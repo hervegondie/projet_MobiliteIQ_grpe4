@@ -36,7 +36,7 @@ ingestion_timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
 # Chaque exécution possède son propre dossier :
 # on ne risque pas de renommer un ancien fichier.
-output_path = Path("./output_travaux") / f"collecte={run_id}"
+output_path = Path("./ingestion/output_travaux") / f"collecte={run_id}"
 
 df_history = None
 
