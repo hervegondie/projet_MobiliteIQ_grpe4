@@ -1,252 +1,180 @@
 
-from datetime import datetime
-import csv
 import os
 import requests
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
+# =====================================================
+# 1. INITIALISATION DE SPARK
+# =====================================================
 
-# --------------------------------------------------
-# 1. Initialisation de la SparkSession
-# --------------------------------------------------
-
-spark = (
-    SparkSession.builder
-    .appName("IngestionMeteoQuebec")
+spark = SparkSession.builder \
+    .appName("IngestionMeteoMobiliteIQ") \
     .getOrCreate()
-)
 
 
-# --------------------------------------------------
-# 2. Paramètres de l'extraction
-# --------------------------------------------------
+# =====================================================
+# 2. CONFIGURATION OPEN-METEO
+# =====================================================
 
-url_api = (
-    "https://api.weather.gc.ca/collections/"
-    "climate-daily/items"
-)
+latitude = 46.8139
+longitude = -71.2080
 
-# Zone approximative autour de la ville de Québec
-bbox = "-71.6,46.6,-70.8,47.1"
-
-annee_debut = 2021
-annee_fin = 2026
-limite_par_annee = 100
-
-dossier_temp = "./meteo/temp"
-fichier_csv_temp = os.path.join(
-    dossier_temp,
-    "observations.csv"
+url = (
+    "https://archive-api.open-meteo.com/v1/archive"
+    "?latitude=46.8139"
+    "&longitude=-71.2080"
+    "&start_date=2023-01-01"
+    "&end_date=2025-12-31"
+    "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum"
+    "&timezone=America/Toronto"
 )
 
 output_path = "./output_meteo"
 
-os.makedirs(dossier_temp, exist_ok=True)
-os.makedirs(output_path, exist_ok=True)
+
+# =====================================================
+# 3. TÉLÉCHARGEMENT DES DONNÉES
+# =====================================================
+
+print("Téléchargement des données météo de Québec...")
+
+response = requests.get(url, timeout=120)
+response.raise_for_status()
+
+data = response.json()
+
+if "daily" not in data:
+    raise Exception(f"Réponse API inattendue : {data}")
+
+daily = data["daily"]
+
+print("Téléchargement réussi.")
 
 
-# --------------------------------------------------
-# 3. Téléchargement des observations météo
-# --------------------------------------------------
+# =====================================================
+# 4. EXTRACTION DES DONNÉES QUOTIDIENNES
+# =====================================================
 
-print("Début de l'extraction météo...")
+dates = daily["time"]
 
-toutes_les_features = []
+print("Nombre de dates reçues :", len(dates))
 
-for annee in range(annee_debut, annee_fin + 1):
+if not dates:
+    raise Exception("Aucune donnée météo reçue.")
 
-    print(f"\nExtraction de l'année {annee}...")
+lignes = []
 
-    params = {
-        "f": "json",
-        "bbox": bbox,
-        "datetime": f"{annee}-01-01/{annee}-12-31",
-        "limit": limite_par_annee,
-        "offset": 0
-    }
+for i, date in enumerate(dates):
 
-    try:
-        response = requests.get(
-            url_api,
-            params=params,
-            timeout=120
-        )
+    lignes.append((
+        date,
+        daily["temperature_2m_max"][i],
+        daily["temperature_2m_min"][i],
+        daily["precipitation_sum"][i]
+    ))
 
-        response.raise_for_status()
 
-        donnees = response.json()
-        features = donnees.get("features", [])
+# =====================================================
+# 5. CRÉATION DU DATAFRAME SPARK
+# =====================================================
 
-        print(
-            f"{len(features)} observations reçues "
-            f"pour {annee}."
-        )
-
-        # Conserver l'année d'extraction pour vérification
-        for feature in features:
-            feature["properties"]["annee_recherchee"] = annee
-
-        toutes_les_features.extend(features)
-
-    except requests.RequestException as erreur:
-        raise RuntimeError(
-            f"Erreur lors du téléchargement pour {annee}: "
-            f"{erreur}"
-        ) from erreur
-
-print(
-    f"\nTotal des observations récupérées : "
-    f"{len(toutes_les_features)}"
+df_incoming = spark.createDataFrame(
+    lignes,
+    [
+        "date",
+        "temperature_max",
+        "temperature_min",
+        "precipitation"
+    ]
 )
 
-
-# --------------------------------------------------
-# 4. Conversion des observations en CSV temporaire
-# --------------------------------------------------
-
-if not toutes_les_features:
-    raise RuntimeError(
-        "Aucune observation météo n'a été récupérée. "
-        "Vérifie l'URL, les paramètres et la réponse de l'API."
-    )
-
-# Recenser les colonnes présentes dans les observations
-colonnes = sorted({
-    colonne
-    for feature in toutes_les_features
-    for colonne in feature.get("properties", {}).keys()
-})
-
-with open(
-    fichier_csv_temp,
-    "w",
-    newline="",
-    encoding="utf-8"
-) as fichier:
-
-    writer = csv.DictWriter(
-        fichier,
-        fieldnames=colonnes,
-        extrasaction="ignore"
-    )
-
-    writer.writeheader()
-
-    for feature in toutes_les_features:
-        writer.writerow(feature.get("properties", {}))
-
-print(f"CSV temporaire créé : {fichier_csv_temp}")
-
-
-# --------------------------------------------------
-# 5. Lecture du CSV avec PySpark
-# --------------------------------------------------
-
-df_incoming = (
-    spark.read
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .csv(fichier_csv_temp)
+# Conversion de la date en type DATE
+df_incoming = df_incoming.withColumn(
+    "date",
+    F.to_date("date")
 )
 
-print("\nStructure des données reçues :")
-df_incoming.printSchema()
+# Ajout des coordonnées géographiques
+df_incoming = df_incoming \
+    .withColumn("latitude", F.lit(latitude)) \
+    .withColumn("longitude", F.lit(longitude))
 
-nombre_observations = df_incoming.count()
+# =====================================================
+# 6. AJOUT DES COLONNES D'HISTORISATION
+# =====================================================
 
-print(
-    f"Nombre de lignes lues par Spark : "
-    f"{nombre_observations}"
-)
-
-
-# --------------------------------------------------
-# 6. Ajout des colonnes de traçabilité
-# --------------------------------------------------
-
-maintenant = datetime.now()
-
-date_str = maintenant.strftime("%Y-%m-%d")
-datetime_filename_str = maintenant.strftime("%Y%m%d_%H%M%S")
-
-df_with_history = (
-    df_incoming
+df_with_history = df_incoming \
     .withColumn(
         "ingestion_timestamp",
         F.current_timestamp()
-    )
+    ) \
     .withColumn(
         "ingestion_date",
         F.current_date()
-    )
+    ) \
     .withColumn(
         "ingestion_time",
-        F.date_format(
-            F.current_timestamp(),
-            "HH:mm:ss"
-        )
-    )
-)
-
-
-# --------------------------------------------------
-# 7. Écriture du CSV historique
-# --------------------------------------------------
-
-# Un dossier distinct par date et par exécution
-partition_dir = os.path.join(
-    output_path,
-    f"ingestion_date={date_str}"
-)
-
-run_dir = os.path.join(
-    partition_dir,
-    f"run_{datetime_filename_str}"
-)
-
-(
-    df_with_history
-    .coalesce(1)
-    .write
-    .mode("errorifexists")
-    .option("header", "true")
-    .csv(run_dir)
-)
-
-# Renommer le fichier part-*.csv généré par Spark
-fichiers_part = [
-    os.path.join(run_dir, nom)
-    for nom in os.listdir(run_dir)
-    if nom.startswith("part-") and nom.endswith(".csv")
-]
-
-if not fichiers_part:
-    raise RuntimeError(
-        "Spark n'a généré aucun fichier CSV."
+        F.date_format(F.current_timestamp(), "HH:mm:ss")
     )
 
-ancien_chemin = fichiers_part[0]
 
-nouveau_nom = f"meteo_quebec_{datetime_filename_str}.csv"
-nouveau_chemin = os.path.join(run_dir, nouveau_nom)
+# =====================================================
+# 7. VÉRIFICATION DES DONNÉES
+# =====================================================
 
-os.rename(ancien_chemin, nouveau_chemin)
+nombre_lignes = df_with_history.count()
 
-print("\nIngestion terminée avec succès.")
-print(f"Observations enregistrées : {nombre_observations}")
-print(f"Fichier final : {nouveau_chemin}")
+print("Nombre de lignes à enregistrer :", nombre_lignes)
+
+if nombre_lignes == 0:
+    raise Exception("Le DataFrame est vide. Écriture annulée.")
+
+print("Aperçu des données :")
+
+df_with_history.show(5, truncate=False)
 
 
-# --------------------------------------------------
-# 8. Nettoyage du fichier temporaire
-# --------------------------------------------------
+# =====================================================
+# 8. ÉCRITURE CSV AVEC HISTORISATION
+# =====================================================
 
-if os.path.exists(fichier_csv_temp):
-    os.remove(fichier_csv_temp)
+print("Enregistrement des données météo...")
 
-print("Fichier temporaire supprimé.")
+df_with_history.coalesce(1).write \
+    .mode("append") \
+    .option("header", "true") \
+    .partitionBy("ingestion_date") \
+    .csv(output_path)
 
-# Arrêt de Spark
+print("Écriture terminée.")
+
+
+# =====================================================
+# 9. VÉRIFICATION DES FICHIERS CRÉÉS
+# =====================================================
+
+fichiers_csv = []
+
+for racine, dossiers, fichiers in os.walk(output_path):
+    for fichier in fichiers:
+        if fichier.endswith(".csv"):
+            fichiers_csv.append(os.path.join(racine, fichier))
+
+if fichiers_csv:
+    print("Fichiers CSV créés :")
+
+    for fichier in fichiers_csv:
+        print(fichier)
+
+else:
+    raise Exception("Aucun fichier CSV n'a été créé.")
+
+print("Ingestion météo de Québec terminée avec succès.")
+
+# =====================================================
+# 10. FERMETURE DE SPARK
+# =====================================================
+
 spark.stop()
