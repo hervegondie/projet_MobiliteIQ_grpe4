@@ -1,2 +1,5 @@
 .env
-ingestion/
+ingestion/ciculation
+ingestion/output_circulation
+ingestion/output_meteo
+ingestion/output_travaux
