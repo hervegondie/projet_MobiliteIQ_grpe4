@@ -8,6 +8,7 @@ from pyspark.sql import functions as F
 # 1. Initialisation de la SparkSession
 spark = SparkSession.builder \
     .appName("IngestionTrafficQcCSV") \
+    .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0") \
     .getOrCreate()
 
 # URL  du Ministère des Transports du Québec
@@ -80,4 +81,53 @@ if os.path.exists(partition_dir):
 if os.path.exists(local_temp_file):
     os.remove(local_temp_file)
     
+    
+    
+    
+#Ajout du code de connexion vers le cloud neon
 
+#Lecture du fichier ingéré
+chemin_csv = os.path.join(partition_dir, nouveau_nom)
+
+df = spark.read \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .option("delimiter", ";") \
+    .csv(chemin_csv)
+    
+print(df.columns)
+
+#Paramètres de connexion NEON
+neon_host = "postgresql://neondb_owner:npg_t0IzpOcg3KYB@ep-misty-thunder-b5l1olqn.c-7.us-east-2.aws.neon.tech/mobiliteIQIngestion?sslmode=require&channel_binding=require"
+neon_db = "mobiliteIQIngestion"
+neon_user = "neondb_owner"
+neon_pass = "npg_t0IzpOcg3KYB"
+
+
+url = f"jdbc:postgresql://{neon_host}:5432/{neon_db}?sslmode=require"
+
+properties = {
+    "user": neon_user,
+    "password": neon_pass,
+    "driver": "org.postgresql.Driver",
+    "sslmode": "require"
+}
+
+target_table = "circulation"
+url = "jdbc:postgresql://ep-misty-thunder-b5l1olqn.c-7.us-east-2.aws.neon.tech:5432/mobiliteIQIngestion?sslmode=require"
+
+
+# Transfert des données ingérées vers Néon
+df.write \
+    .format("jdbc") \
+    .option("url", url) \
+    .option("dbtable","circulation" ) \
+    .option("user", neon_user ) \
+    .option("password",neon_pass)\
+    .option("driver", "org.postgresql.Driver") \
+    .mode("overwrite") \
+    .save()
+    #.option("batchsize", 1000) \
+    #.jdbc(url = url, table=target_table, properties=properties)
+    
+print("Fichier CSV ingéré et transféré avec succès vers Neon !")
