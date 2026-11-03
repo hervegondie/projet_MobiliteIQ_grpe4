@@ -1,2 +1,6 @@
 .env
-ingestion/output_meteo/
+ingestion/ciculation
+ingestion/meteo
+ingestion/output_circulation
+ingestion/output_meteo
+ingestion/output_travaux

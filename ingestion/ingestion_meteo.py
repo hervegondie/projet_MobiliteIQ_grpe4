@@ -1,180 +1,181 @@
-
+from datetime import datetime
+import glob
 import os
 import requests
-
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.functions import col, to_date, avg
+from pyspark.sql.types import DoubleType, StringType, StructField, StructType
 
-# =====================================================
-# 1. INITIALISATION DE SPARK
-# =====================================================
-
+#initialisation de Spark Session
 spark = SparkSession.builder \
-    .appName("IngestionMeteoMobiliteIQ") \
+    .appName("Ingestion Meteo") \
+    .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0") \
     .getOrCreate()
 
-
-# =====================================================
-# 2. CONFIGURATION OPEN-METEO
-# =====================================================
-
+# 1. Coordonnées géographiques (ex: Québec) et période
 latitude = 46.8139
 longitude = -71.2080
+date_debut = "2024-01-01"
+date_fin = "2026-09-28"
 
+# 2. URL Open-Meteo Archive incluant les données journalières ET la visibilité horaire
 url = (
-    "https://archive-api.open-meteo.com/v1/archive"
-    "?latitude=46.8139"
-    "&longitude=-71.2080"
-    "&start_date=2023-01-01"
-    "&end_date=2025-12-31"
-    "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum"
-    "&timezone=America/Toronto"
+    f"https://archive-api.open-meteo.com/v1/archive?latitude={latitude}&longitude={longitude}"
+    f"&start_date={date_debut}&end_date={date_fin}"
+    "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,rain_sum,snowfall_sum,wind_speed_10m_max,wind_gusts_10m_max"
+    "&hourly=visibility"
+    "&timezone=auto"
 )
 
-output_path = "./output_meteo"
+reponse = requests.get(url)
 
+if reponse.status_code == 200:
+    data = reponse.json()
 
-# =====================================================
-# 3. TÉLÉCHARGEMENT DES DONNÉES
-# =====================================================
+    # --- Données horaires (Visibilité) ---
+    donnees_horaires = data["hourly"]
+    lignes_horaires = []
+    for i in range(len(donnees_horaires["time"])):
+        lignes_horaires.append((
+            donnees_horaires["time"][i],
+            donnees_horaires["visibility"][i]
+        ))
 
-print("Téléchargement des données météo de Québec...")
+    # --- Données journalières ---
+    donnees_journalieres = data["daily"]
+    lignes_journalieres = []
+    for i in range(len(donnees_journalieres["time"])):
+        lignes_journalieres.append((
+            donnees_journalieres["time"][i],
+            donnees_journalieres["temperature_2m_max"][i],
+            donnees_journalieres["temperature_2m_min"][i],
+            donnees_journalieres["precipitation_sum"][i],
+            donnees_journalieres["rain_sum"][i],
+            donnees_journalieres["snowfall_sum"][i],
+            donnees_journalieres["wind_speed_10m_max"][i],
+            donnees_journalieres["wind_gusts_10m_max"][i]
+        ))
 
-response = requests.get(url, timeout=120)
-response.raise_for_status()
+    # 3. Initialisation de Spark
+    spark = SparkSession.builder.appName("IngestionMeteoComplete").getOrCreate()
 
-data = response.json()
+    # 4. Schémas explicites
+    schema_horaire = StructType([
+        StructField("temps", StringType(), True),
+        StructField("visibilite", DoubleType(), True)
+    ])
 
-if "daily" not in data:
-    raise Exception(f"Réponse API inattendue : {data}")
+    schema_journalier = StructType([
+        StructField("date", StringType(), True),
+        StructField("temperature_max", DoubleType(), True),
+        StructField("temperature_min", DoubleType(), True),
+        StructField("precipitation_totale", DoubleType(), True),
+        StructField("pluie", DoubleType(), True),
+        StructField("neige", DoubleType(), True),
+        StructField("vitesse_vent_max", DoubleType(), True),
+        StructField("rafales_vent_max", DoubleType(), True)
+    ])
 
-daily = data["daily"]
+    df_meteo_horaire = spark.createDataFrame(lignes_horaires, schema=schema_horaire)
+    df_meteo_journalier = spark.createDataFrame(lignes_journalieres, schema=schema_journalier)
 
-print("Téléchargement réussi.")
+  # 5. Agrégation, fusion et TRI par ordre chronologique
+    df_visibilite_moyenne = df_meteo_horaire \
+        .withColumn("date_ref", to_date(col("temps"))) \
+        .groupBy("date_ref") \
+        .agg(avg("visibilite").alias("visibilite_moyenne"))
 
+    df_final_journalier = df_meteo_journalier \
+        .join(df_visibilite_moyenne, df_meteo_journalier["date"] == df_visibilite_moyenne["date_ref"], "left") \
+        .drop("date_ref") \
+        .orderBy("date")
 
-# =====================================================
-# 4. EXTRACTION DES DONNÉES QUOTIDIENNES
-# =====================================================
+    print("--- Aperçu du tableau journalier trié par date ---")
+    df_final_journalier.show(10, truncate=False)
+    print(f"Nombre total de jours récupérés : {df_final_journalier.count()}")
 
-dates = daily["time"]
+    # 6. SAUVEGARDE EN FICHIERS CSV
+    # Définition des chemins avant la sauvegarde pour que Spark écrive au bon endroit
+    output_path = "./output_meteo"
+    date_str = datetime.today().strftime("%Y-%m-%d")
+    datetime_filename_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    partition_dir = os.path.join(output_path, f"ingestion_date={date_str}")
 
-print("Nombre de dates reçues :", len(dates))
+    # .coalesce(1) permet de fusionner les données pour obtenir un seul fichier CSV par table
+    df_final_journalier.coalesce(1) \
+        .write.mode("append") \
+        .option("header", "true") \
+        .csv(partition_dir)
 
-if not dates:
-    raise Exception("Aucune donnée météo reçue.")
+    # df_meteo_horaire.coalesce(1) \
+    #     .write.mode("overwrite") \
+    #     .option("header", "true") \
+    #     .csv("meteo_horaire_export")
 
-lignes = []
-
-for i, date in enumerate(dates):
-
-    lignes.append((
-        date,
-        daily["temperature_2m_max"][i],
-        daily["temperature_2m_min"][i],
-        daily["precipitation_sum"][i]
-    ))
-
-
-# =====================================================
-# 5. CRÉATION DU DATAFRAME SPARK
-# =====================================================
-
-df_incoming = spark.createDataFrame(
-    lignes,
-    [
-        "date",
-        "temperature_max",
-        "temperature_min",
-        "precipitation"
-    ]
-)
-
-# Conversion de la date en type DATE
-df_incoming = df_incoming.withColumn(
-    "date",
-    F.to_date("date")
-)
-
-# Ajout des coordonnées géographiques
-df_incoming = df_incoming \
-    .withColumn("latitude", F.lit(latitude)) \
-    .withColumn("longitude", F.lit(longitude))
-
-# =====================================================
-# 6. AJOUT DES COLONNES D'HISTORISATION
-# =====================================================
-
-df_with_history = df_incoming \
-    .withColumn(
-        "ingestion_timestamp",
-        F.current_timestamp()
-    ) \
-    .withColumn(
-        "ingestion_date",
-        F.current_date()
-    ) \
-    .withColumn(
-        "ingestion_time",
-        F.date_format(F.current_timestamp(), "HH:mm:ss")
-    )
-
-
-# =====================================================
-# 7. VÉRIFICATION DES DONNÉES
-# =====================================================
-
-nombre_lignes = df_with_history.count()
-
-print("Nombre de lignes à enregistrer :", nombre_lignes)
-
-if nombre_lignes == 0:
-    raise Exception("Le DataFrame est vide. Écriture annulée.")
-
-print("Aperçu des données :")
-
-df_with_history.show(5, truncate=False)
-
-
-# =====================================================
-# 8. ÉCRITURE CSV AVEC HISTORISATION
-# =====================================================
-
-print("Enregistrement des données météo...")
-
-df_with_history.coalesce(1).write \
-    .mode("append") \
-    .option("header", "true") \
-    .partitionBy("ingestion_date") \
-    .csv(output_path)
-
-print("Écriture terminée.")
-
-
-# =====================================================
-# 9. VÉRIFICATION DES FICHIERS CRÉÉS
-# =====================================================
-
-fichiers_csv = []
-
-for racine, dossiers, fichiers in os.walk(output_path):
-    for fichier in fichiers:
-        if fichier.endswith(".csv"):
-            fichiers_csv.append(os.path.join(racine, fichier))
-
-if fichiers_csv:
-    print("Fichiers CSV créés :")
-
-    for fichier in fichiers_csv:
-        print(fichier)
+    print("Sauvegarde CSV terminée avec succès !")
 
 else:
-    raise Exception("Aucun fichier CSV n'a été créé.")
+    # Correction du tiret parasite et de la f-string multiligne
+    print(f"Erreur lors de l'appel API : {reponse.status_code} - {reponse.text}")
+    
+# 6. Renommer le fichier part-00000 généré pour inclure la date et l'heure
+if os.path.exists(partition_dir):
+    # Chercher le fichier part-*.csv créé par Spark
+    fichiers_part = glob.glob(os.path.join(partition_dir, "part-*.csv"))
+    
+    if fichiers_part:
+        ancien_chemin = fichiers_part[0]
+        nouveau_nom = f"meteo_{datetime_filename_str}.csv"
+        nouveau_chemin = os.path.join(partition_dir, nouveau_nom)
+        
+        # Renommer le fichier
+        os.rename(ancien_chemin, nouveau_chemin)
+        print(f"Fichier renommé avec succès : {nouveau_nom}")
+        
+        #Ajout du code de connexion vers le cloud neon
 
-print("Ingestion météo de Québec terminée avec succès.")
+#Lecture du fichier ingéré
+chemin_csv = os.path.join(partition_dir, nouveau_nom)
 
-# =====================================================
-# 10. FERMETURE DE SPARK
-# =====================================================
+df = spark.read \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .option("delimiter", ";") \
+    .csv(chemin_csv)
+    
+print(df.columns)
 
-spark.stop()
+#Paramètres de connexion NEON
+neon_host = "postgresql://neondb_owner:npg_t0IzpOcg3KYB@ep-misty-thunder-b5l1olqn.c-7.us-east-2.aws.neon.tech/mobiliteIQIngestion?sslmode=require&channel_binding=require"
+neon_db = "mobiliteIQIngestion"
+neon_user = "neondb_owner"
+neon_pass = "npg_t0IzpOcg3KYB"
+
+
+url = f"jdbc:postgresql://{neon_host}:5432/{neon_db}?sslmode=require"
+
+properties = {
+    "user": neon_user,
+    "password": neon_pass,
+    "driver": "org.postgresql.Driver",
+    "sslmode": "require"
+}
+
+target_table = "circulation"
+url = "jdbc:postgresql://ep-misty-thunder-b5l1olqn.c-7.us-east-2.aws.neon.tech:5432/mobiliteIQIngestion?sslmode=require"
+
+
+# Transfert des données ingérées vers Néon
+df.write \
+    .format("jdbc") \
+    .option("url", url) \
+    .option("dbtable","meteo" ) \
+    .option("user", neon_user ) \
+    .option("password",neon_pass)\
+    .option("driver", "org.postgresql.Driver") \
+    .mode("overwrite") \
+    .save()
+   
+    
+print("Fichier CSV ingéré et transféré avec succès vers Neon !")
