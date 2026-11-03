@@ -176,7 +176,6 @@ df.write \
     .option("driver", "org.postgresql.Driver") \
     .mode("overwrite") \
     .save()
-    #.option("batchsize", 1000) \
-    #.jdbc(url = url, table=target_table, properties=properties)
+   
     
 print("Fichier CSV ingéré et transféré avec succès vers Neon !")
