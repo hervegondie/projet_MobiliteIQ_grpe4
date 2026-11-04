@@ -1,3 +1,5 @@
 requests
 requests
 pyspark
+sqlalchemy "psycopg[binary]" pandas
+pandas
