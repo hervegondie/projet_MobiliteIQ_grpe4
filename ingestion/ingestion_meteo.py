@@ -1,180 +1,396 @@
 
+from datetime import datetime
 import os
+import glob
+import shutil
 import requests
+import pandas as pd
+import psycopg
 
+from sqlalchemy import create_engine, URL
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
+from pyspark.sql.functions import col, to_date, avg, current_timestamp
+from pyspark.sql.types import (
+    DoubleType,
+    StringType,
+    StructField,
+    StructType
+)
 
 # =====================================================
 # 1. INITIALISATION DE SPARK
 # =====================================================
 
 spark = SparkSession.builder \
-    .appName("IngestionMeteoMobiliteIQ") \
+    .appName("IngestionMeteoComplete") \
+    .config(
+        "spark.jars.packages",
+        "org.postgresql:postgresql:42.6.0"
+    ) \
     .getOrCreate()
 
+spark.sparkContext.setLogLevel("WARN")
 
 # =====================================================
-# 2. CONFIGURATION OPEN-METEO
+# 2. PARAMÈTRES MÉTÉO
 # =====================================================
 
 latitude = 46.8139
 longitude = -71.2080
 
+date_debut = "2023-01-01"
+date_fin = "2025-12-31"
+
 url = (
     "https://archive-api.open-meteo.com/v1/archive"
-    "?latitude=46.8139"
-    "&longitude=-71.2080"
-    "&start_date=2023-01-01"
-    "&end_date=2025-12-31"
-    "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum"
+    f"?latitude={latitude}"
+    f"&longitude={longitude}"
+    f"&start_date={date_debut}"
+    f"&end_date={date_fin}"
+    "&daily=temperature_2m_max,temperature_2m_min,"
+    "precipitation_sum,rain_sum,snowfall_sum,"
+    "wind_speed_10m_max,wind_gusts_10m_max"
+    "&hourly=visibility"
     "&timezone=America/Toronto"
 )
 
-output_path = "./output_meteo"
-
-
 # =====================================================
-# 3. TÉLÉCHARGEMENT DES DONNÉES
+# 3. APPEL DE L'API
 # =====================================================
 
-print("Téléchargement des données météo de Québec...")
+print("--- Appel de l'API Open-Meteo ---")
 
-response = requests.get(url, timeout=120)
-response.raise_for_status()
+reponse = requests.get(url, timeout=60)
+reponse.raise_for_status()
 
-data = response.json()
+data = reponse.json()
 
-if "daily" not in data:
-    raise Exception(f"Réponse API inattendue : {data}")
+if "daily" not in data or "hourly" not in data:
+    raise Exception("Les sections daily ou hourly sont absentes.")
 
-daily = data["daily"]
-
-print("Téléchargement réussi.")
-
+print("Réponse JSON reçue avec succès.")
 
 # =====================================================
-# 4. EXTRACTION DES DONNÉES QUOTIDIENNES
+# 4. EXTRACTION DES DONNÉES HORAIRES
 # =====================================================
 
-dates = daily["time"]
+print("--- Extraction des données horaires ---")
 
-print("Nombre de dates reçues :", len(dates))
+donnees_horaires = pd.DataFrame(data["hourly"])
 
-if not dates:
-    raise Exception("Aucune donnée météo reçue.")
+if not {"time", "visibility"}.issubset(donnees_horaires.columns):
+    raise Exception("Colonnes horaires manquantes.")
 
-lignes = []
+lignes_horaires = list(zip(
+    donnees_horaires["time"].astype(str),
+    pd.to_numeric(
+        donnees_horaires["visibility"],
+        errors="coerce"
+    ).tolist()
+))
 
-for i, date in enumerate(dates):
+schema_horaire = StructType([
+    StructField("temps", StringType(), True),
+    StructField("visibilite", DoubleType(), True)
+])
 
-    lignes.append((
-        date,
-        daily["temperature_2m_max"][i],
-        daily["temperature_2m_min"][i],
-        daily["precipitation_sum"][i]
+df_meteo_horaire = spark.createDataFrame(
+    lignes_horaires,
+    schema=schema_horaire
+)
+
+print("Nombre de lignes horaires :", df_meteo_horaire.count())
+
+# =====================================================
+# 5. EXTRACTION DES DONNÉES JOURNALIÈRES
+# =====================================================
+
+print("--- Extraction des données journalières ---")
+
+donnees_journalieres = pd.DataFrame(data["daily"])
+
+colonnes_daily = [
+    "time",
+    "temperature_2m_max",
+    "temperature_2m_min",
+    "precipitation_sum",
+    "rain_sum",
+    "snowfall_sum",
+    "wind_speed_10m_max",
+    "wind_gusts_10m_max"
+]
+
+for colonne in colonnes_daily:
+    if colonne not in donnees_journalieres.columns:
+        raise Exception(f"Colonne manquante : {colonne}")
+
+lignes_journalieres = []
+
+for _, ligne in donnees_journalieres.iterrows():
+
+    lignes_journalieres.append((
+        str(ligne["time"]),
+        None if pd.isna(ligne["temperature_2m_max"]) else float(ligne["temperature_2m_max"]),
+        None if pd.isna(ligne["temperature_2m_min"]) else float(ligne["temperature_2m_min"]),
+        None if pd.isna(ligne["precipitation_sum"]) else float(ligne["precipitation_sum"]),
+        None if pd.isna(ligne["rain_sum"]) else float(ligne["rain_sum"]),
+        None if pd.isna(ligne["snowfall_sum"]) else float(ligne["snowfall_sum"]),
+        None if pd.isna(ligne["wind_speed_10m_max"]) else float(ligne["wind_speed_10m_max"]),
+        None if pd.isna(ligne["wind_gusts_10m_max"]) else float(ligne["wind_gusts_10m_max"])
     ))
 
+schema_journalier = StructType([
+    StructField("date", StringType(), True),
+    StructField("temperature_max", DoubleType(), True),
+    StructField("temperature_min", DoubleType(), True),
+    StructField("precipitation_totale", DoubleType(), True),
+    StructField("pluie", DoubleType(), True),
+    StructField("neige", DoubleType(), True),
+    StructField("vitesse_vent_max", DoubleType(), True),
+    StructField("rafales_vent_max", DoubleType(), True)
+])
 
-# =====================================================
-# 5. CRÉATION DU DATAFRAME SPARK
-# =====================================================
-
-df_incoming = spark.createDataFrame(
-    lignes,
-    [
-        "date",
-        "temperature_max",
-        "temperature_min",
-        "precipitation"
-    ]
+df_meteo_journalier = spark.createDataFrame(
+    lignes_journalieres,
+    schema=schema_journalier
 )
 
-# Conversion de la date en type DATE
-df_incoming = df_incoming.withColumn(
-    "date",
-    F.to_date("date")
-)
-
-# Ajout des coordonnées géographiques
-df_incoming = df_incoming \
-    .withColumn("latitude", F.lit(latitude)) \
-    .withColumn("longitude", F.lit(longitude))
+print("Nombre de lignes journalières :", df_meteo_journalier.count())
 
 # =====================================================
-# 6. AJOUT DES COLONNES D'HISTORISATION
+# 6. CALCUL DE LA VISIBILITÉ MOYENNE
 # =====================================================
 
-df_with_history = df_incoming \
-    .withColumn(
-        "ingestion_timestamp",
-        F.current_timestamp()
-    ) \
-    .withColumn(
-        "ingestion_date",
-        F.current_date()
-    ) \
-    .withColumn(
-        "ingestion_time",
-        F.date_format(F.current_timestamp(), "HH:mm:ss")
+print("--- Calcul de la visibilité moyenne ---")
+
+df_visibilite_moyenne = df_meteo_horaire \
+    .withColumn("date_ref", to_date(col("temps"))) \
+    .groupBy("date_ref") \
+    .agg(
+        avg("visibilite").alias("visibilite_moyenne")
     )
 
-
 # =====================================================
-# 7. VÉRIFICATION DES DONNÉES
-# =====================================================
-
-nombre_lignes = df_with_history.count()
-
-print("Nombre de lignes à enregistrer :", nombre_lignes)
-
-if nombre_lignes == 0:
-    raise Exception("Le DataFrame est vide. Écriture annulée.")
-
-print("Aperçu des données :")
-
-df_with_history.show(5, truncate=False)
-
-
-# =====================================================
-# 8. ÉCRITURE CSV AVEC HISTORISATION
+# 7. FUSION ET AJOUT DU TIMESTAMP
 # =====================================================
 
-print("Enregistrement des données météo...")
+print("--- Fusion des données météo ---")
 
-df_with_history.coalesce(1).write \
-    .mode("append") \
+df_final_journalier = df_meteo_journalier \
+    .join(
+        df_visibilite_moyenne,
+        df_meteo_journalier["date"] == df_visibilite_moyenne["date_ref"],
+        "left"
+    ) \
+    .drop("date_ref") \
+    .orderBy("date")
+
+# Ajout de la date et heure d'ingestion
+df_final_journalier = df_final_journalier.withColumn(
+    "ingestion_timestamp",
+    current_timestamp()
+)
+
+print("--- Aperçu du tableau final ---")
+
+df_final_journalier.show(10, truncate=False)
+
+nombre_jours = df_final_journalier.count()
+
+print("Nombre total de jours :", nombre_jours)
+
+# =====================================================
+# 8. SAUVEGARDE CSV
+# =====================================================
+
+print("--- Génération du fichier CSV ---")
+
+output_path = "./output_meteo"
+
+date_str = datetime.today().strftime("%Y-%m-%d")
+datetime_filename_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+partition_dir = os.path.join(
+    output_path,
+    f"ingestion_date={date_str}"
+)
+
+os.makedirs(partition_dir, exist_ok=True)
+
+temp_csv_dir = os.path.join(
+    partition_dir,
+    f"temp_{datetime_filename_str}"
+)
+
+df_final_journalier.coalesce(1) \
+    .write \
+    .mode("overwrite") \
     .option("header", "true") \
-    .partitionBy("ingestion_date") \
-    .csv(output_path)
+    .csv(temp_csv_dir)
 
-print("Écriture terminée.")
+fichiers_part = glob.glob(
+    os.path.join(temp_csv_dir, "part-*.csv")
+)
 
+if not fichiers_part:
+    raise Exception("Aucun fichier CSV généré par Spark.")
 
-# =====================================================
-# 9. VÉRIFICATION DES FICHIERS CRÉÉS
-# =====================================================
+nouveau_nom = f"meteo_{datetime_filename_str}.csv"
 
-fichiers_csv = []
+chemin_csv = os.path.join(partition_dir, nouveau_nom)
 
-for racine, dossiers, fichiers in os.walk(output_path):
-    for fichier in fichiers:
-        if fichier.endswith(".csv"):
-            fichiers_csv.append(os.path.join(racine, fichier))
+os.replace(fichiers_part[0], chemin_csv)
 
-if fichiers_csv:
-    print("Fichiers CSV créés :")
+shutil.rmtree(temp_csv_dir)
 
-    for fichier in fichiers_csv:
-        print(fichier)
-
-else:
-    raise Exception("Aucun fichier CSV n'a été créé.")
-
-print("Ingestion météo de Québec terminée avec succès.")
+print("CSV généré :", chemin_csv)
 
 # =====================================================
-# 10. FERMETURE DE SPARK
+# 9. LECTURE DU CSV AVEC PANDAS
+# =====================================================
+
+print("--- Lecture du CSV ---")
+
+pdf = pd.read_csv(
+    chemin_csv,
+    dtype=str,
+    engine="python"
+)
+
+print("Nombre de lignes CSV :", len(pdf))
+print("Nombre de colonnes :", len(pdf.columns))
+
+if pdf.empty:
+    raise Exception("Le fichier CSV est vide.")
+
+# =====================================================
+# 10. PARAMÈTRES DE CONNEXION NEON
+# =====================================================
+
+neon_host = "ep-misty-thunder-b5l1olqn.c-7.us-east-2.aws.neon.tech"
+neon_db = "mobiliteIQIngestion"
+neon_user = "neondb_owner"
+
+# Mot de passe repris de ton code initial
+neon_pass = "npg_t0IzpOcg3KYB"
+
+table_name = "meteo"
+
+# =====================================================
+# 11. CRÉATION DE LA TABLE NEON
+# =====================================================
+
+print("--- Connexion et création de la table Neon ---")
+
+with psycopg.connect(
+    host=neon_host,
+    dbname=neon_db,
+    user=neon_user,
+    password=neon_pass,
+    port=5432,
+    sslmode="require",
+    connect_timeout=20
+) as conn:
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            f'DROP TABLE IF EXISTS "{table_name}"'
+        )
+
+        columns_def = ", ".join(
+            f'"{colonne}" TEXT'
+            for colonne in pdf.columns
+        )
+
+        create_table_query = (
+            f'CREATE TABLE "{table_name}" ({columns_def})'
+        )
+
+        cur.execute(create_table_query)
+
+    conn.commit()
+
+print("Table Neon recréée avec succès.")
+
+# =====================================================
+# 12. TRANSFERT DES DONNÉES VERS NEON
+# =====================================================
+
+print("--- Transfert CSV vers Neon ---")
+
+db_url_sqlalchemy = URL.create(
+    drivername="postgresql+psycopg",
+    username=neon_user,
+    password=neon_pass,
+    host=neon_host,
+    port=5432,
+    database=neon_db,
+    query={"sslmode": "require"}
+)
+
+engine = create_engine(
+    db_url_sqlalchemy,
+    pool_pre_ping=True
+)
+
+try:
+
+    pdf.to_sql(
+        name=table_name,
+        con=engine,
+        if_exists="append",
+        index=False,
+        chunksize=500,
+        method="multi"
+    )
+
+    print("Transfert terminé avec succès !")
+
+finally:
+    engine.dispose()
+
+# =====================================================
+# 13. VÉRIFICATION FINALE
+# =====================================================
+
+print("--- Vérification dans Neon ---")
+
+with psycopg.connect(
+    host=neon_host,
+    dbname=neon_db,
+    user=neon_user,
+    password=neon_pass,
+    port=5432,
+    sslmode="require"
+) as conn:
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            f'SELECT COUNT(*) FROM "{table_name}"'
+        )
+
+        total = cur.fetchone()[0]
+
+        cur.execute(
+            f'SELECT * FROM "{table_name}" LIMIT 5'
+        )
+
+        resultats = cur.fetchall()
+
+        print("------------------------------------")
+        print("INGESTION TERMINÉE")
+        print("Fichier CSV :", chemin_csv)
+        print("Lignes CSV :", len(pdf))
+        print("Lignes Neon :", total)
+        print("Exemples :", resultats)
+        print("------------------------------------")
+
+# =====================================================
+# 14. ARRÊT DE SPARK
 # =====================================================
 
 spark.stop()
+
+print("Session Spark arrêtée.")
