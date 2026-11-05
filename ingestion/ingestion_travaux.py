@@ -1,51 +1,114 @@
+import os
 from datetime import datetime, timezone
+from getpass import getpass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit, unquote, parse_qsl, urlencode
 from uuid import uuid4
 
 import requests
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-# 1. Initialisation de Spark
+
+# ============================================================
+# 1. Connexion à Neon
+# ============================================================
+
+# Utiliser DATABASE_URL si elle existe, sinon demander la connexion.
+# La saisie du terminal est invisible.
+connexion = os.environ.get("DATABASE_URL") or getpass(
+    "Connexion PostgreSQL Neon : "
+)
+
+adresse = urlsplit(connexion.strip())
+
+if adresse.scheme not in ("postgresql", "postgres") or not adresse.hostname:
+    raise ValueError("La connexion PostgreSQL est invalide.")
+
+if unquote(adresse.path.lstrip("/")) != "mobiliteIQIngestion":
+    raise ValueError(
+        "La connexion doit cibler la base mobiliteIQIngestion."
+    )
+
+if not adresse.username or not adresse.password:
+    raise ValueError(
+        "La connexion doit contenir un utilisateur et un mot de passe."
+    )
+
+options = dict(parse_qsl(adresse.query))
+options.setdefault("sslmode", "require")
+
+# Adapter le nom du paramètre au pilote JDBC PostgreSQL.
+if "channel_binding" in options:
+    options["channelBinding"] = options.pop("channel_binding")
+
+jdbc_url = (
+    f"jdbc:postgresql://{adresse.hostname}:{adresse.port or 5432}"
+    f"{adresse.path}?{urlencode(options)}"
+)
+
+
+# ============================================================
+# 2. Initialisation de Spark
+# ============================================================
+
 spark = (
     SparkSession.builder
     .appName("IngestionTravauxQcCSV")
+    .config(
+        "spark.jars.packages",
+        "org.postgresql:postgresql:42.7.8",
+    )
     .getOrCreate()
 )
-
-# Même fuseau pour les dates Python et Spark
-spark.conf.set("spark.sql.session.timeZone", "UTC")
-
-# 2. Source officielle des travaux routiers MTMD
-url = "https://ws.mapserver.transports.gouv.qc.ca/swtq"
-
-params = {
-    "service": "wfs",
-    "version": "2.0.0",
-    "request": "getfeature",
-    "typename": "ms:chantiers_mtmdet",
-    "outfile": "TravauxRoutiers",
-    "outputformat": "csv",
-}
-
-# Identifiant unique pour chaque collecte
-now = datetime.now(timezone.utc)
-run_id = now.strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
-ingestion_timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-
-# Chaque exécution possède son propre dossier :
-# on ne risque pas de renommer un ancien fichier.
-output_path = Path("./output_travaux") / f"collecte={run_id}"
 
 df_history = None
 
 try:
-    # Le dossier temporaire est supprimé à la fin du traitement.
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+
+    # ========================================================
+    # 3. Source officielle des travaux routiers
+    # ========================================================
+
+    url = "https://ws.mapserver.transports.gouv.qc.ca/swtq"
+
+    params = {
+        "service": "wfs",
+        "version": "2.0.0",
+        "request": "getfeature",
+        "typename": "ms:chantiers_mtmdet",
+        "outfile": "TravauxRoutiers",
+        "outputformat": "csv",
+    }
+
+    now = datetime.now(timezone.utc)
+
+    run_id = (
+        now.strftime("%Y%m%d_%H%M%S")
+        + "_"
+        + uuid4().hex[:8]
+    )
+
+    ingestion_timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Dossier situé à côté de ce fichier Python.
+    dossier_ingestion = Path(__file__).resolve().parent
+
+    output_path = (
+        dossier_ingestion
+        / "output_travaux"
+        / f"collecte={run_id}"
+    )
+
+    # ========================================================
+    # 4. Téléchargement du CSV
+    # ========================================================
+
     with TemporaryDirectory(prefix="travaux_") as temp_dir:
         local_file = Path(temp_dir) / "travaux.csv"
 
-        # 3. Téléchargement
         print("Téléchargement des travaux routiers...")
 
         response = requests.get(
@@ -55,12 +118,13 @@ try:
         )
         response.raise_for_status()
 
-        # Un service WFS peut renvoyer une erreur XML avec HTTP 200.
-        beginning = response.content.lstrip()[:1024].lower()
-        content_type = response.headers.get("Content-Type", "").lower()
-
         if not response.content.strip():
             raise ValueError("La réponse du serveur est vide.")
+
+        beginning = response.content.lstrip()[:1024].lower()
+        content_type = response.headers.get(
+            "Content-Type", ""
+        ).lower()
 
         if (
             beginning.startswith(b"<")
@@ -68,24 +132,31 @@ try:
             or "html" in content_type
         ):
             raise ValueError(
-                "Le serveur a retourné du XML/HTML au lieu du CSV attendu."
+                "Le serveur a retourné du XML/HTML "
+                "au lieu du CSV attendu."
             )
 
         local_file.write_bytes(response.content)
 
-        # 4. Lecture du CSV
+        # ====================================================
+        # 5. Lecture du CSV
+        # ====================================================
+
+        # Conserver les champs sources en texte.
         df_incoming = (
             spark.read
             .option("header", "true")
             .option("encoding", "UTF-8")
             .option("multiLine", "true")
             .option("mode", "FAILFAST")
-            # Conservation des valeurs sources en texte
             .option("inferSchema", "false")
             .csv(str(local_file))
         )
 
-        # 5. Colonnes de traçabilité
+        # ====================================================
+        # 6. Ajout des colonnes de traçabilité
+        # ====================================================
+
         df_history = (
             df_incoming
             .withColumn(
@@ -98,39 +169,93 @@ try:
             )
             .withColumn(
                 "ingestion_time",
-                F.date_format("ingestion_timestamp", "HH:mm:ss"),
+                F.date_format(
+                    "ingestion_timestamp",
+                    "HH:mm:ss",
+                ),
             )
             .cache()
         )
 
         count = df_history.count()
+
         print(f"Nombre d'enregistrements reçus : {count}")
 
-        # 6. Sauvegarde d'un nouvel instantané historique
-        (
-            df_history.coalesce(1)
-            .write
-            .mode("errorifexists")
-            .option("header", "true")
-            .partitionBy("ingestion_date")
-            .csv(str(output_path))
-        )
-
-        # 7. Renommage du fichier de cette collecte uniquement
-        part_files = list(
-            output_path.glob("ingestion_date=*/part-*.csv")
-        )
-
-        for part_file in part_files:
-            destination = part_file.with_name(
-                f"travaux_{run_id}.csv"
+        if count == 0:
+            print(
+                "Aucun travail reçu : "
+                "aucun fichier historique ni insertion dans Neon."
             )
-            part_file.rename(destination)
 
-        print(f"Collecte enregistrée dans : {output_path}")
+        else:
+            # ================================================
+            # 7. Sauvegarde CSV locale
+            # ================================================
+
+            (
+                df_history.coalesce(1)
+                .write
+                .mode("errorifexists")
+                .option("header", "true")
+                .partitionBy("ingestion_date")
+                .csv(str(output_path))
+            )
+
+            # Renommer uniquement le CSV de cette collecte.
+            for part_file in output_path.glob(
+                "ingestion_date=*/part-*.csv"
+            ):
+                destination = part_file.with_name(
+                    f"travaux_{run_id}.csv"
+                )
+
+                part_file.rename(destination)
+
+            print(f"CSV enregistré dans : {output_path}")
+
+            # ================================================
+            # 8. Enregistrement dans Neon
+            # ================================================
+
+            # La base mobiliteIQIngestion doit déjà exister.
+            # Spark crée la table si elle est absente et si
+            # l'utilisateur possède les droits nécessaires.
+            print("Enregistrement des travaux dans Neon...")
+
+            (
+                df_history.coalesce(1)
+                .write
+                .format("jdbc")
+                .option("url", jdbc_url)
+                .option("dbtable", "public.travaux_bruts")
+                .option(
+                    "user",
+                    unquote(adresse.username),
+                )
+                .option(
+                    "password",
+                    unquote(adresse.password),
+                )
+                .option(
+                    "driver",
+                    "org.postgresql.Driver",
+                )
+                .mode("append")
+                .save()
+            )
+
+            print(
+                f"SUCCÈS : {count} lignes enregistrées dans "
+                "mobiliteIQIngestion.public.travaux_bruts."
+            )
 
 finally:
-    if df_history is not None:
-        df_history.unpersist()
+    # ========================================================
+    # 9. Libération des ressources et arrêt de Spark
+    # ========================================================
 
-    spark.stop()
+    try:
+        if df_history is not None:
+            df_history.unpersist()
+    finally:
+        spark.stop()
