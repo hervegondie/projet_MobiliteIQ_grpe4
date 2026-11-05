@@ -127,8 +127,8 @@ print(f"Fichier CSV cible trouvé : {chemin_csv_reel}")
 
 # Lecture avec Pandas (moteur python + tolérance)
 pdf = pd.read_csv(
-    chemin_csv_reel, 
-    dtype=str, 
+    chemin_csv_reel,
+    dtype=str,
     engine='python',
     on_bad_lines='skip'
 )
@@ -146,10 +146,10 @@ engine = create_engine(db_url_sqlalchemy)
 
 # Insertion par lots (chunksize=500 pour éviter de saturer les requêtes SQL)
 pdf.to_sql(
-    name=table_name, 
-    con=engine, 
-    if_exists='append', 
-    index=False, 
+    name=table_name,
+    con=engine,
+    if_exists='append',
+    index=False,
     chunksize=500
 )
 

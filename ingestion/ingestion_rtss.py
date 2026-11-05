@@ -66,12 +66,12 @@ partition_dir = os.path.join(output_path, f"ingestion_date={date_str}")
 if os.path.exists(partition_dir):
     # Chercher le fichier part-*.csv créé par Spark
     fichiers_part = glob.glob(os.path.join(partition_dir, "part-*.csv"))
-    
+
     if fichiers_part:
         ancien_chemin = fichiers_part[0]
         nouveau_nom = f"route_{datetime_filename_str}.csv"
         nouveau_chemin = os.path.join(partition_dir, nouveau_nom)
-        
+
         # Renommer le fichier
         os.rename(ancien_chemin, nouveau_chemin)
         print(f"Fichier renommé avec succès : {nouveau_nom}")
@@ -124,8 +124,8 @@ print(f"Fichier CSV cible trouvé : {chemin_csv_reel}")
 
 # Lecture avec Pandas (moteur python + tolérance)
 pdf = pd.read_csv(
-    chemin_csv_reel, 
-    dtype=str, 
+    chemin_csv_reel,
+    dtype=str,
     engine='python',
     on_bad_lines='skip'
 )
@@ -143,10 +143,10 @@ engine = create_engine(db_url_sqlalchemy)
 
 # Insertion par lots (chunksize=500 pour éviter de saturer les requêtes SQL)
 pdf.to_sql(
-    name=table_name, 
-    con=engine, 
-    if_exists='append', 
-    index=False, 
+    name=table_name,
+    con=engine,
+    if_exists='append',
+    index=False,
     chunksize=500
 )
 
@@ -164,7 +164,7 @@ df = spark.read \
     .option("inferSchema", "true") \
     .option("delimiter", ";") \
     .csv(chemin_csv)
-    
+
 print(df.columns)
 
 #Paramètres de connexion NEON
@@ -197,7 +197,7 @@ df.write \
     .option("driver", "org.postgresql.Driver") \
     .mode("overwrite") \
     .save()
-   
-    
+
+
 print("Fichier CSV ingéré et transféré avec succès vers Neon !")
 """
