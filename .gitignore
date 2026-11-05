@@ -1,4 +1,17 @@
 .env
-ingestion/test_neon.py/
-ingestion/test.py/
-ingestion/test1.py/
+
+# Scripts de test personnels
+ingestion/test_neon.py
+ingestion/test.py
+ingestion/test1.py
+
+# Fichiers et dossiers générés
+ingestion/ciculation
+ingestion/meteo
+ingestion/output_circulation
+ingestion/output_travaux
+ingestion/output_route
+
+# Autres exclusions
+jars
+read_data.py

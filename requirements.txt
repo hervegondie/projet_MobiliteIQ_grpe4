@@ -1,3 +1,6 @@
 requests
-requests
-pyspark
+pyspark==4.3.0
+sqlalchemy
+psycopg[binary]
+pandas
+python-dotenv
