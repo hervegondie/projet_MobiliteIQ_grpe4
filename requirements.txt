@@ -1,5 +1,6 @@
 requests
-requests
-pyspark
-sqlalchemy "psycopg[binary]" pandas
+pyspark==4.3.0
+sqlalchemy
+psycopg[binary]
 pandas
+python-dotenv
