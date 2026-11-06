@@ -1,4 +1,3 @@
-
 from datetime import datetime
 import os
 import glob
@@ -291,9 +290,76 @@ with psycopg.connect(
     sslmode="require",
     connect_timeout=20
 ) as conn:
+=======
+"""Télécharger la météo journalière, sauvegarder un CSV et importer ce CSV dans Neon."""
+import argparse
+import os
+import sys
+from datetime import date, datetime, timezone
+from getpass import getpass
+from pathlib import Path
+from uuid import uuid4
+
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, Text
+from sqlalchemy.engine import make_url
+
+# Période unique : les mêmes valeurs sont utilisées dans la requête.
+DATE_DEBUT = "2024-01-01"
+DATE_FIN = "2026-09-28"
+LATITUDE = 46.8139
+LONGITUDE = -71.2080
+
+COLONNES = {
+    "time": "date",
+    "temperature_2m_max": "temperature_max",
+    "temperature_2m_min": "temperature_min",
+    "precipitation_sum": "precipitation_totale",
+    "rain_sum": "pluie",
+    "snowfall_sum": "neige",
+    "wind_speed_10m_max": "vitesse_vent_max",
+    "wind_gusts_10m_max": "rafales_vent_max",
+}
+
+
+def telecharger():
+    debut, fin = date.fromisoformat(DATE_DEBUT), date.fromisoformat(DATE_FIN)
+    if debut > fin:
+        raise ValueError("DATE_DEBUT doit précéder DATE_FIN.")
+    reponse = requests.get(
+        "https://archive-api.open-meteo.com/v1/archive",
+        params={
+            "latitude": LATITUDE,
+            "longitude": LONGITUDE,
+            "start_date": DATE_DEBUT,
+            "end_date": DATE_FIN,
+            "daily": ",".join(k for k in COLONNES if k != "time"),
+            "timezone": "America/Toronto",
+            "temperature_unit": "celsius",
+            "wind_speed_unit": "kmh",
+            "precipitation_unit": "mm",
+        },
+        timeout=(15, 180),
+    )
+    reponse.raise_for_status()
+    data = reponse.json()
+    if data.get("error"):
+        raise ValueError(f"Erreur Open-Meteo : {data.get('reason', 'inconnue')}")
+    daily = data.get("daily")
+    if not isinstance(daily, dict) or any(k not in daily for k in COLONNES):
+        raise ValueError("Réponse incomplète : colonnes journalières manquantes.")
+    df = pd.DataFrame({nouveau: daily[ancien] for ancien, nouveau in COLONNES.items()})
+    dates_attendues = pd.date_range(debut, fin).strftime("%Y-%m-%d").tolist()
+    if df["date"].tolist() != dates_attendues:
+        raise ValueError("Les dates reçues ne correspondent pas à la période complète demandée.")
+    return df
+>>>>>>> 7779d17 (transformation test)
 
     with conn.cursor() as cur:
 
+<<<<<<< HEAD
         cur.execute(
             f'DROP TABLE IF EXISTS "{table_name}"'
         )
@@ -394,3 +460,65 @@ with psycopg.connect(
 spark.stop()
 
 print("Session Spark arrêtée.")
+=======
+def importer_csv(chemin):
+    # Aucune ligne incorrecte n'est ignorée silencieusement.
+    df = pd.read_csv(chemin, dtype=str, keep_default_na=False, encoding="utf-8", on_bad_lines="error")
+    if df.empty or list(df.columns) != list(COLONNES.values()):
+        raise ValueError("CSV vide ou colonnes différentes du format attendu.")
+    # Les cellules vides deviennent NULL ; une valeur manquante n'est pas zéro.
+    df = df.replace("", None)
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    connexion = os.environ.get("DATABASE_URL", "").strip()
+    if not connexion:
+        if not sys.stdin.isatty():
+            raise ValueError("Configurer le secret GitHub DATABASE_URL.")
+        connexion = getpass("Connexion PostgreSQL Neon : ").strip()
+    adresse = make_url(connexion)
+    if adresse.drivername not in ("postgres", "postgresql", "postgresql+psycopg"):
+        raise ValueError("Utiliser une URL PostgreSQL.")
+    if adresse.database != "mobiliteIQIngestion":
+        raise ValueError("La connexion doit cibler mobiliteIQIngestion.")
+    adresse = adresse.set(drivername="postgresql+psycopg")
+    if "sslmode" not in adresse.query:
+        adresse = adresse.update_query_dict({"sslmode": "require"})
+    engine = create_engine(adresse, connect_args={"connect_timeout": 30})
+    try:
+        # Transaction : validation à la fin, annulation si une insertion échoue.
+        with engine.begin() as conn:
+            df.to_sql(
+                name="meteo", schema="public", con=conn,
+                if_exists="append", index=False, chunksize=500,
+                dtype={nom: Text() for nom in df.columns},
+            )
+    finally:
+        engine.dispose()
+    print(f"SUCCÈS : {len(df)} lignes importées depuis {chemin.name} dans public.meteo.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--csv", type=Path, help="Importer un CSV déjà créé par ce script, sans téléchargement.")
+    parser.add_argument("--csv-seulement", action="store_true", help="Créer le CSV sans écrire dans Neon.")
+    args = parser.parse_args()
+    if args.csv and args.csv_seulement:
+        parser.error("Choisir --csv OU --csv-seulement.")
+    if args.csv:
+        chemin = args.csv
+    else:
+        print(f"Téléchargement météo Québec : {DATE_DEBUT} au {DATE_FIN}...")
+        df = telecharger()
+        maintenant = datetime.now(timezone.utc)
+        identifiant = maintenant.strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
+        dossier = Path(__file__).resolve().parent / "output_meteo" / f"collecte={identifiant}"
+        dossier.mkdir(parents=True, exist_ok=False)
+        chemin = dossier / f"meteo_{identifiant}.csv"
+        df.to_csv(chemin, index=False, encoding="utf-8", sep=",")
+        print(f"CSV créé : {chemin} ({len(df)} lignes).")
+    if not args.csv_seulement:
+        importer_csv(chemin)
+
+
+if __name__ == "__main__":
+    main()
+>>>>>>> 7779d17 (transformation test)
