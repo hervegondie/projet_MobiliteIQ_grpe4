@@ -55,7 +55,7 @@ jdbc_url = (
 
 spark = (
     SparkSession.builder
-    .appName("IngestionTravauxQcCSV")
+    .appName("IngestionRtssQcCSV")
     .config(
         "spark.jars.packages",
         "org.postgresql:postgresql:42.7.8",
@@ -69,7 +69,7 @@ try:
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
     # ========================================================
-    # 3. Source officielle des travaux routiers
+    # 3. Source officielle du réseau routier RTSS
     # ========================================================
 
     url = "https://ws.mapserver.transports.gouv.qc.ca/swtq"
@@ -78,8 +78,8 @@ try:
         "service": "wfs",
         "version": "2.0.0",
         "request": "getfeature",
-        "typename": "ms:chantiers_mtmdet",
-        "outfile": "TravauxRoutiers",
+        "typename": "ms:bgr_v_sous_route_res_sup_act",
+        "outfile": "ReseauRoutier_RTSS",
         "outputformat": "csv",
     }
 
@@ -98,7 +98,7 @@ try:
 
     output_path = (
         dossier_ingestion
-        / "output_travaux"
+        / "output_route"
         / f"collecte={run_id}"
     )
 
@@ -106,10 +106,10 @@ try:
     # 4. Téléchargement du CSV
     # ========================================================
 
-    with TemporaryDirectory(prefix="travaux_") as temp_dir:
-        local_file = Path(temp_dir) / "travaux.csv"
+    with TemporaryDirectory(prefix="route_") as temp_dir:
+        local_file = Path(temp_dir) / "route.csv"
 
-        print("Téléchargement des travaux routiers...")
+        print("Téléchargement du réseau routier RTSS...")
 
         response = requests.get(
             url,
@@ -153,6 +153,15 @@ try:
             .csv(str(local_file))
         )
 
+        # Vérifier que le serveur a bien retourné le réseau RTSS.
+        colonnes_attendues = {"ide_sous_r", "num_route"}
+        colonnes_absentes = colonnes_attendues - set(df_incoming.columns)
+        if colonnes_absentes:
+            raise ValueError(
+                "Le CSV ne correspond pas au réseau RTSS. "
+                f"Colonnes absentes : {sorted(colonnes_absentes)}"
+            )
+
         # ====================================================
         # 6. Ajout des colonnes de traçabilité
         # ====================================================
@@ -183,7 +192,7 @@ try:
 
         if count == 0:
             print(
-                "Aucun travail reçu : "
+                "Aucun segment routier reçu : "
                 "aucun fichier historique ni insertion dans Neon."
             )
 
@@ -206,7 +215,7 @@ try:
                 "ingestion_date=*/part-*.csv"
             ):
                 destination = part_file.with_name(
-                    f"travaux_{run_id}.csv"
+                    f"route_{run_id}.csv"
                 )
 
                 part_file.rename(destination)
@@ -220,14 +229,20 @@ try:
             # La base mobiliteIQIngestion doit déjà exister.
             # Spark crée la table si elle est absente et si
             # l'utilisateur possède les droits nécessaires.
-            print("Enregistrement des travaux dans Neon...")
+            print("Enregistrement du réseau RTSS dans Neon...")
 
             (
                 df_history.coalesce(1)
+                # La table Bronze public.route existante stocke
+                # toutes ses colonnes en TEXT, y compris les dates.
+                .select([
+                    F.col(column).cast("string").alias(column)
+                    for column in df_history.columns
+                ])
                 .write
                 .format("jdbc")
                 .option("url", jdbc_url)
-                .option("dbtable", "public.travaux_bruts")
+                .option("dbtable", "public.route")
                 .option(
                     "user",
                     unquote(adresse.username),
@@ -246,7 +261,7 @@ try:
 
             print(
                 f"SUCCÈS : {count} lignes enregistrées dans "
-                "mobiliteIQIngestion.public.travaux_bruts."
+                "mobiliteIQIngestion.public.route."
             )
 
 finally:
