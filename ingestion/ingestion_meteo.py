@@ -25,6 +25,9 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 import json
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 LATITUDE = 46.8139
 LONGITUDE = -71.2080
@@ -112,20 +115,20 @@ def determiner_periode(debut=None, fin=None, jours=7, maintenant=None):
     return end - timedelta(days=jours-1), end, API_RECENTE
 
 
-def telecharger(debut, fin, api_url=API_URL):
+def telecharger_brut(debut, fin, api_url=API_URL, latitude=LATITUDE, longitude=LONGITUDE):
     import requests
 
-    print(f"Téléchargement météo Québec : {debut} au {fin}...")
     response = requests.get(
         api_url,
         params={
-            "latitude": LATITUDE,
-            "longitude": LONGITUDE,
+            "latitude": latitude,
+            "longitude": longitude,
             "start_date": debut.isoformat(),
             "end_date": fin.isoformat(),
             "daily": ",".join(MESURES),
             "hourly": "visibility",
             "timezone": FUSEAU_METEO,
+            "timeformat": "iso8601",
             "temperature_unit": "celsius",
             "wind_speed_unit": "kmh",
             "precipitation_unit": "mm",
@@ -133,7 +136,15 @@ def telecharger(debut, fin, api_url=API_URL):
         timeout=(15, 180),
     )
     response.raise_for_status()
-    return extraire_lignes(response.json(), debut, fin)
+    data = response.json()
+    if not isinstance(data, dict) or data.get("error"):
+        raise ValueError("L'API Open-Meteo a retourne une erreur")
+    return data
+
+
+def telecharger(debut, fin, api_url=API_URL):
+    print(f"Téléchargement météo Québec : {debut} au {fin}...")
+    return extraire_lignes(telecharger_brut(debut, fin, api_url), debut, fin)
 
 
 def creer_csv(daily_rows, hourly_rows, output_dir):
@@ -294,7 +305,16 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--csv", type=Path, help="Importer un CSV existant compatible, sans Spark ni téléchargement")
     modes.add_argument("--csv-seulement", action="store_true", help="Créer le CSV sans écrire dans Neon")
+    parser.add_argument("--points", type=Path, help="Configuration de la variante quotidienne multi-points")
+    parser.add_argument("--manifest", type=Path, default=Path("reports/collecte_meteo_quotidienne_points.json"))
     args = parser.parse_args()
+    if args.points:
+        if args.csv:
+            parser.error("--csv mono-point ne peut pas etre combine avec --points")
+        from ingestion.ingestion_meteo_quotidienne_points import executer
+        executer(args.points, args.date_debut, args.date_fin, args.jours,
+                 args.csv_seulement, args.output_dir / "points", args.manifest)
+        return
     try:
         debut, fin, api_url = determiner_periode(args.date_debut, args.date_fin, args.jours)
     except ValueError as exc:
@@ -333,4 +353,5 @@ if __name__ == "__main__":
             print(f"Échec de l'ingestion météo ({type(exc).__name__}). "
                   "Aucune transaction Neon partielle validée. Le CSV déjà créé reste disponible.", file=sys.stderr)
         sys.exit(1)
+
 
