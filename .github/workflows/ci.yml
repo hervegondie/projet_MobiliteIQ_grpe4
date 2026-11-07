@@ -16,12 +16,16 @@ jobs:
 
     steps:
       - name: Recuperer le code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Installer Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Verifier la syntaxe Python
-        run: python -m compileall -q ingestion
+        run: python -m compileall -q ingestion transformation tests
+
+
+      - name: Tester les ingestions sans reseau ni connexion Neon
+        run: python -m unittest discover -s tests -p 'test_ingestion*.py' -v

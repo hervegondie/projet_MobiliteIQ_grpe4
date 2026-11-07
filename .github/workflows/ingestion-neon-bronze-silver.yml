@@ -3,11 +3,6 @@ name: Travaux Bronze vers Silver_test
 on:
   schedule:
     - cron: '35 * * * *'
-  push:
-    branches:
-      - main
-      - dev
-      - feature/polaris  
   workflow_dispatch:
 
 permissions:
@@ -73,3 +68,4 @@ jobs:
           --source-timezone America/Toronto
           --ingestion-timezone UTC
           --apply
+
