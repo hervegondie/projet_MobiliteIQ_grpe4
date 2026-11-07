@@ -3,6 +3,11 @@ name: Travaux Bronze vers Silver_test
 on:
   schedule:
     - cron: '35 * * * *'
+  push:
+    branches:
+      - main
+      - dev
+      - feature/polaris  
   workflow_dispatch:
 
 permissions:
@@ -26,6 +31,8 @@ jobs:
     steps:
       - name: Recuperer le code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       - name: Verifier les secrets sans les afficher
         shell: bash
