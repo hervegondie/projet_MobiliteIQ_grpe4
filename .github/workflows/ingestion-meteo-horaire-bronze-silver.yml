@@ -1,0 +1,82 @@
+name: Meteo horaire 6 points vers Silver_test
+
+on:
+  schedule:
+    - cron: '25 * * * *'
+  workflow_dispatch:
+    inputs:
+      json_seulement:
+        description: 'Verifier API et JSON sans connexion ni ecriture Neon'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingestion-meteo-horaire-bronze-silver
+  cancel-in-progress: false
+
+jobs:
+  meteo-horaire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      BRONZE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SILVER_DATABASE_URL: ${{ secrets.SILVER_DATABASE_URL }}
+      PYTHONUNBUFFERED: '1'
+      METEO_POINTS: config/points_meteo_quebec.json
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-meteo-horaire.txt
+      - name: Installer les dependances de la collecte horaire
+        run: python -m pip install -r requirements-meteo-horaire.txt
+      - name: Tests rapides avant ingestion
+        run: |
+          mkdir -p reports
+          python -m compileall -q ingestion transformation tests
+          python -m unittest discover -s tests -p 'test_ingestion*.py' -v 2>&1 | tee reports/tests-meteo-horaire.log
+      - name: Verifier les connexions sans ecriture
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.json_seulement) }}
+        run: |
+          python - <<'PY'
+          from transformation.integration_meteo_horaire import connexion
+          with connexion('bronze', readonly=True), connexion('silver', readonly=True):
+              print('Connexions Bronze et Silver valides')
+          PY
+      - name: Collecter la meteo et ecrire le brut dans Bronze
+        run: |
+          options=()
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.json_seulement || false }}" = "true" ]; then
+            options+=(--json-seulement)
+          fi
+          python ingestion/ingestion_meteo_horaire.py --points "$METEO_POINTS" --heures 48 "${options[@]}"
+      - name: Transformer cette collecte vers Silver
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.json_seulement) }}
+        run: python transformation/transformation_meteo_horaire.py --manifest reports/collecte_meteo_horaire.json --apply
+      - name: Verifier les lignes reelles apres chargement
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.json_seulement) }}
+        run: python transformation/transformation_meteo_horaire.py --manifest reports/collecte_meteo_horaire.json --verifier --rapport reports/qualite_meteo_horaire.json
+      - name: Conserver les rapports et le JSON source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meteo-horaire-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            reports/
+            ingestion/output_meteo_horaire/
+          retention-days: 3
+          if-no-files-found: ignore
+      - name: Signaler un echec
+        if: failure()
+        run: |
+          echo '### Meteo horaire en echec' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Consulter la premiere etape rouge. Une collecte Bronze valide reste conservee si Silver echoue.' >> "$GITHUB_STEP_SUMMARY"

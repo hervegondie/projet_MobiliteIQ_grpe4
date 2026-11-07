@@ -23,3 +23,7 @@ ingestion/output_meteo/
 output_route/
 output_meteo/
 *.crc
+
+ingestion/output_meteo_horaire/
+ingestion/output_meteo_points/
+reports/

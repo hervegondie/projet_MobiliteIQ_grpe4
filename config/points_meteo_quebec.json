@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "Points representatifs des secteurs, pas des stations ni des zones de couverture garanties.",
+  "points": [
+    {"lieu_id": "quebec", "nom": "Québec centre", "latitude": 46.8139, "longitude": -71.2080,
+     "source_url": "Configuration du projet MobiliteIQ existant"},
+    {"lieu_id": "sainte_foy", "nom": "Sainte-Foy", "latitude": 46.7694444, "longitude": -71.3083333,
+     "source_url": "https://geonames.nrcan.gc.ca/search-place-names/unique?id=ERKFB"},
+    {"lieu_id": "beauport", "nom": "Beauport", "latitude": 46.8588411, "longitude": -71.1920071,
+     "source_url": "https://www.geonames.org/search.html?q=Beauport%2C+Quebec"},
+    {"lieu_id": "charlesbourg", "nom": "Charlesbourg", "latitude": 46.85833, "longitude": -71.26666,
+     "source_url": "https://toponymie.gouv.qc.ca/ct/ToposWeb/Fiche.aspx?no_seq=378880"},
+    {"lieu_id": "val_belair", "nom": "Val-Bélair", "latitude": 46.8638889, "longitude": -71.4333333,
+     "source_url": "https://toponymes.rncan.gc.ca/search-place-names/unique?id=ERKFE"},
+    {"lieu_id": "levis", "nom": "Lévis rive sud", "latitude": 46.75817, "longitude": -71.24037,
+     "source_url": "https://toponymie.gouv.qc.ca/ct/ToposWeb/Fiche.aspx?no_seq=35834"}
+  ]
+}
