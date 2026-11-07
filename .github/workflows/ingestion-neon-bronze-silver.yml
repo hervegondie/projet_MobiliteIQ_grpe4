@@ -1,0 +1,68 @@
+name: Travaux Bronze vers Silver_test
+
+on:
+  schedule:
+    - cron: '35 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingestion-travaux-neon
+  cancel-in-progress: false
+
+jobs:
+  travaux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      BRONZE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SILVER_DATABASE_URL: ${{ secrets.SILVER_DATABASE_URL }}
+      PYTHONUNBUFFERED: '1'
+      SPARK_LOCAL_IP: 127.0.0.1
+
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      - name: Verifier les secrets sans les afficher
+        shell: bash
+        run: |
+          if [ -z "$BRONZE_DATABASE_URL" ]; then
+            echo "::error::Ajouter le secret DATABASE_URL pour mobiliteIQIngestion."
+            exit 1
+          fi
+          if [ -z "$SILVER_DATABASE_URL" ]; then
+            echo "::error::Ajouter le secret SILVER_DATABASE_URL pour Silver_test."
+            exit 1
+          fi
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Installer Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Installer les dependances
+        run: python -m pip install -r requirements.txt tzdata
+
+      - name: Ingerer les travaux dans Bronze
+        run: python ingestion/ingestion_travaux.py
+
+      # success() bloque le chargement Silver si une etape precedente echoue.
+      - name: Transformer les travaux vers Silver_test
+        if: ${{ success() }}
+        run: >-
+          python transformation/transformation_4_sources.py
+          --sources travaux_bruts
+          --source-timezone America/Toronto
+          --ingestion-timezone UTC
+          --apply
