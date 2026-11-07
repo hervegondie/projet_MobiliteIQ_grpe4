@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Bash explicite : un echec dans un pipe doit rendre le job rouge.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   verification:
     runs-on: ubuntu-latest
@@ -45,6 +50,8 @@ jobs:
       TEST_NEON_HOST: ${{ vars.TEST_NEON_HOST }}
       SPARK_LOCAL_IP: '127.0.0.1'
       PYTHONUNBUFFERED: '1'
+      # Charger JDBC au lancement de la JVM, avant le premier contexte meteo.
+      PYSPARK_SUBMIT_ARGS: '--packages org.postgresql:postgresql:42.7.8 pyspark-shell'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -59,8 +66,23 @@ jobs:
       - name: Tester les connexions et les marqueurs sans ecriture
         run: |
           python -c "import sys; sys.path.insert(0, 'tests'); from neon_support import guarded_connections; guarded_connections(); print('Connexions de test et marqueurs valides')"
+      - name: Verifier le pilote PostgreSQL avant les tests
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pyspark.sql import SparkSession
+          for passage in (1, 2):
+              spark = SparkSession.builder.master('local[1]').appName('VerificationJDBC').getOrCreate()
+              try:
+                  loader = spark._jvm.java.lang.Thread.currentThread().getContextClassLoader()
+                  driver = loader.loadClass('org.postgresql.Driver')
+                  print(f'Pilote JDBC disponible, demarrage {passage} : {driver.getName()}')
+              finally:
+                  spark.stop()
+          PY
       - name: Integration et bout en bout sur Neon de test
         run: |
+          set -euo pipefail
           mkdir -p reports
           python -m unittest discover -s tests -p 'test_neon_*.py' -v 2>&1 | tee reports/neon-tests.log
       - name: Conserver le rapport
@@ -71,3 +93,4 @@ jobs:
           path: reports/
           if-no-files-found: ignore
           retention-days: 7
+
