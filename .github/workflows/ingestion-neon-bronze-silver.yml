@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Recuperer le code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       - name: Verifier les secrets sans les afficher
         shell: bash
@@ -66,3 +68,4 @@ jobs:
           --source-timezone America/Toronto
           --ingestion-timezone UTC
           --apply
+

@@ -4,3 +4,4 @@ sqlalchemy
 psycopg[binary]
 pandas
 python-dotenv
+tzdata>=2025.2

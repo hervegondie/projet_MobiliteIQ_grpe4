@@ -1,0 +1,85 @@
+name: Debits Bronze vers Silver_test
+
+on:
+  schedule:
+    - cron: '45 6 * * *'
+  workflow_dispatch:
+    inputs:
+      csv_seulement:
+        description: 'Verifier la collecte sans ecriture dans Neon'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingestion-debits-bronze-silver
+  cancel-in-progress: false
+
+jobs:
+  debits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      BRONZE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SILVER_DATABASE_URL: ${{ secrets.SILVER_DATABASE_URL }}
+      VERIFICATION_SEULEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.csv_seulement || false }}
+      PYTHONUNBUFFERED: '1'
+      SPARK_LOCAL_IP: 127.0.0.1
+
+    steps:
+      - name: Recuperer la branche executee
+        uses: actions/checkout@v5
+
+      - name: Verifier les secrets sans les afficher
+        shell: bash
+        run: |
+          if [ "$VERIFICATION_SEULEMENT" = "true" ]; then
+            exit 0
+          fi
+          if [ -z "$BRONZE_DATABASE_URL" ]; then
+            echo "::error::Configurer DATABASE_URL pour mobiliteIQIngestion."
+            exit 1
+          fi
+          if [ -z "$SILVER_DATABASE_URL" ]; then
+            echo "::error::Configurer SILVER_DATABASE_URL pour Silver_test."
+            exit 1
+          fi
+
+      - name: Installer Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Installer les dependances
+        run: python -m pip install -r requirements.txt
+
+      - name: Ingerer debits dans Bronze
+        shell: bash
+        run: |
+          if [ "$VERIFICATION_SEULEMENT" = "true" ]; then
+            python ingestion/ingestion_debits.py --csv-seulement
+          else
+            python ingestion/ingestion_debits.py
+          fi
+
+      - name: Transformer debits vers Silver_test
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.csv_seulement) }}
+        run: >-
+          python transformation/transformation_4_sources.py
+          --sources circulation
+          --source-timezone America/Toronto
+          --ingestion-timezone UTC
+          --apply
+
+      - name: Conserver les fichiers de collecte
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: collecte-debits-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ingestion/output_circulation/
+          retention-days: 3
+          if-no-files-found: ignore
