@@ -29,3 +29,45 @@ jobs:
 
       - name: Tester les ingestions sans reseau ni connexion Neon
         run: python -m unittest discover -s tests -p 'test_ingestion*.py' -v
+
+  tests-neon:
+    if: github.event_name == 'workflow_dispatch'
+    needs: verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: neon-ci-test-123
+      cancel-in-progress: false
+    env:
+      RUN_NEON_TESTS: '1'
+      TEST_BRONZE_DATABASE_URL: ${{ secrets.TEST_BRONZE_DATABASE_URL }}
+      TEST_SILVER_DATABASE_URL: ${{ secrets.TEST_SILVER_DATABASE_URL }}
+      TEST_NEON_HOST: ${{ vars.TEST_NEON_HOST }}
+      SPARK_LOCAL_IP: '127.0.0.1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Installer les dependances
+        run: pip install -r requirements.txt
+      - name: Tester les connexions et les marqueurs sans ecriture
+        run: |
+          python -c "import sys; sys.path.insert(0, 'tests'); from neon_support import guarded_connections; guarded_connections(); print('Connexions de test et marqueurs valides')"
+      - name: Integration et bout en bout sur Neon de test
+        run: |
+          mkdir -p reports
+          python -m unittest discover -s tests -p 'test_neon_*.py' -v 2>&1 | tee reports/neon-tests.log
+      - name: Conserver le rapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-neon-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
