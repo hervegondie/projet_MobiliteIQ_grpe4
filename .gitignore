@@ -15,3 +15,11 @@ ingestion/output_route
 # Autres exclusions
 jars
 read_data.py
+
+# Collectes et caches locaux (les fichiers deja suivis restent dans l'historique)
+__pycache__/
+*.py[cod]
+ingestion/output_meteo/
+output_route/
+output_meteo/
+*.crc

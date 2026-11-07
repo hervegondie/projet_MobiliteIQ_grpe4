@@ -5,6 +5,8 @@ Connexion : BRONZE_DATABASE_URL ou DATABASE_URL; sinon saisie masquée.
 --csv-seulement : préparer le CSV sans accès à Neon.
 --csv chemin.csv : importer un CSV existant sans Spark ni appel météo.
 Les dix colonnes sont compatibles avec le pipeline Silver actuel.
+Par défaut : sept jours complets récents via l'API Forecast (modèles archivés).
+--date-debut et --date-fin : période historique explicite via l'API Archive.
 """
 from __future__ import annotations
 
@@ -20,14 +22,15 @@ import sys
 from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import uuid4
+from zoneinfo import ZoneInfo
+import json
 
 
-DATE_DEBUT = "2023-01-01"
-DATE_FIN = "2025-12-31"
 LATITUDE = 46.8139
 LONGITUDE = -71.2080
 FUSEAU_METEO = "America/Toronto"
 API_URL = "https://archive-api.open-meteo.com/v1/archive"
+API_RECENTE = "https://api.open-meteo.com/v1/forecast"
 
 # Ordre commun à l'extraction, au CSV et à la table Bronze.
 MESURES = {
@@ -92,12 +95,29 @@ def extraire_lignes(data, debut, fin):
     return daily_rows, hourly_rows
 
 
-def telecharger(debut, fin):
+def determiner_periode(debut=None, fin=None, jours=7, maintenant=None):
+    """Choisir des jours civils complets au Québec, sans inclure aujourd'hui."""
+    if (debut is None) != (fin is None):
+        raise ValueError("Fournir ensemble --date-debut et --date-fin")
+    if debut is not None:
+        if debut > fin:
+            raise ValueError("--date-debut doit précéder ou égaler --date-fin")
+        return debut, fin, API_URL
+    if not 1 <= jours <= 92:
+        raise ValueError("--jours doit être compris entre 1 et 92")
+    now = maintenant or datetime.now(timezone.utc)
+    if now.utcoffset() is None:
+        raise ValueError("L'heure de référence doit préciser un fuseau")
+    end = now.astimezone(ZoneInfo(FUSEAU_METEO)).date() - timedelta(days=1)
+    return end - timedelta(days=jours-1), end, API_RECENTE
+
+
+def telecharger(debut, fin, api_url=API_URL):
     import requests
 
     print(f"Téléchargement météo Québec : {debut} au {fin}...")
     response = requests.get(
-        API_URL,
+        api_url,
         params={
             "latitude": LATITUDE,
             "longitude": LONGITUDE,
@@ -266,21 +286,35 @@ def importer_csv(path, connection):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--date-debut", type=date.fromisoformat, default=date.fromisoformat(DATE_DEBUT))
-    parser.add_argument("--date-fin", type=date.fromisoformat, default=date.fromisoformat(DATE_FIN))
+    parser.add_argument("--date-debut", type=date.fromisoformat)
+    parser.add_argument("--date-fin", type=date.fromisoformat)
+    parser.add_argument("--jours", type=int, default=7,
+                        help="Nombre de jours complets récents si aucune période explicite n'est donnée (défaut : 7)")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "output_meteo")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--csv", type=Path, help="Importer un CSV existant compatible, sans Spark ni téléchargement")
     modes.add_argument("--csv-seulement", action="store_true", help="Créer le CSV sans écrire dans Neon")
     args = parser.parse_args()
-    if args.date_debut > args.date_fin:
-        parser.error("--date-debut doit précéder ou égaler --date-fin")
+    try:
+        debut, fin, api_url = determiner_periode(args.date_debut, args.date_fin, args.jours)
+    except ValueError as exc:
+        parser.error(str(exc))
     connection = None if args.csv_seulement else connexion_bronze()
     if args.csv:
         path = args.csv
     else:
-        daily_rows, hourly_rows = telecharger(args.date_debut, args.date_fin)
+        daily_rows, hourly_rows = telecharger(debut, fin, api_url)
         path = creer_csv(daily_rows, hourly_rows, args.output_dir)
+        manifest = {
+            "source": "Open-Meteo", "api_url": api_url, "latitude": LATITUDE,
+            "longitude": LONGITUDE, "timezone": FUSEAU_METEO,
+            "date_debut": debut.isoformat(), "date_fin": fin.isoformat(),
+            "nature": "modeles_archives" if api_url == API_RECENTE else "reanalyses_historiques",
+            "csv_file": path.name, "rows": len(daily_rows),
+            "temperature_unit": "celsius", "wind_speed_unit": "kmh",
+            "precipitation_unit": "mm", "snowfall_unit": "cm", "visibility_unit": "m",
+        }
+        (path.parent / "collecte.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     count = verifier_csv(path)
     if args.csv_seulement:
         print(f"Vérification réussie : {count} lignes. Aucune écriture dans Neon.")
@@ -299,3 +333,4 @@ if __name__ == "__main__":
             print(f"Échec de l'ingestion météo ({type(exc).__name__}). "
                   "Aucune transaction Neon partielle validée. Le CSV déjà créé reste disponible.", file=sys.stderr)
         sys.exit(1)
+
