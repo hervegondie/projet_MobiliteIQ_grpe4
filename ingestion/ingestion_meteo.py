@@ -108,10 +108,6 @@ if reponse.status_code == 200:
         .option("header", "true") \
         .csv(partition_dir)
 
-    # df_meteo_horaire.coalesce(1) \
-    #     .write.mode("overwrite") \
-    #     .option("header", "true") \
-    #     .csv("meteo_horaire_export")
 
     print("Sauvegarde CSV terminée avec succès !")
 
@@ -162,7 +158,7 @@ properties = {
     "sslmode": "require"
 }
 
-target_table = "circulation"
+target_table = "meteo"
 url = "jdbc:postgresql://ep-misty-thunder-b5l1olqn.c-7.us-east-2.aws.neon.tech:5432/mobiliteIQIngestion?sslmode=require"
 
 
