@@ -9,6 +9,20 @@ from transformation.correspondances_geospatiales import construire,SCHEMA
 from transformation.regles_correspondances import valider_config
 
 
+def nettoyer_runs_gold(conn,run_ids):
+    """Supprimer uniquement les runs du test, enfants avant parents.
+
+    Les deux FK vers points_meteo_correspondance ne sont pas en cascade.
+    Ne pas dependre de l'ordre des cascades declenchees depuis le run.
+    """
+    ids=list(dict.fromkeys(run_ids))
+    if not ids:return
+    for table in ['pont_troncon_meteo','pont_troncon_travaux','pont_troncon_debit',
+                  'correspondances_non_appariees','correspondance_publication',
+                  'troncons_correspondance','points_meteo_correspondance','correspondance_runs']:
+        conn.execute(f'DELETE FROM gold.{table} WHERE run_id=ANY(%s)',(ids,))
+
+
 class CorrespondancesPostgisTests(NeonCase):
     def setUp(self):
         super().setUp()
@@ -49,7 +63,7 @@ class CorrespondancesPostgisTests(NeonCase):
     def clean_correspondances(self):
         with self.pg.connect(self.urls['silver']) as conn:
             if conn.execute("SELECT to_regclass('gold.correspondance_runs')").fetchone()[0] and self.geo_runs:
-                conn.execute('DELETE FROM gold.correspondance_runs WHERE run_id=ANY(%s)',(self.geo_runs,))
+                nettoyer_runs_gold(conn,self.geo_runs)
             for name in ['geo_rejets','geo_observations','geo_collectes_silver']:
                 if conn.execute('SELECT to_regclass(%s)',('public.'+name,)).fetchone()[0]:
                     conn.execute(self.sql.SQL('DELETE FROM public.{} WHERE collecte_id=%s').format(
