@@ -1,0 +1,90 @@
+name: Geometries Silver et prerequis Gold
+
+on:
+  schedule:
+    - cron: '40 * * * *'
+    - cron: '10 7 * * *'
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: 'travaux, routes_debits ou toutes'
+        type: choice
+        options: [toutes, travaux, routes_debits]
+        default: toutes
+      appliquer:
+        description: 'Ecrire dans Bronze puis Silver (sinon JSON sans Neon)'
+        type: boolean
+        default: false
+      installer:
+        description: 'Installer PostGIS et les tables (uniquement avec appliquer)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+concurrency:
+  group: geometries-reference-gold
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  geometries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BRONZE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SILVER_DATABASE_URL: ${{ secrets.SILVER_DATABASE_URL }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-gold.txt
+      - run: python -m pip install -r requirements-gold.txt
+      - name: Tests des prerequis sans Neon
+        run: |
+          python -m compileall -q ingestion transformation tests
+          python -m unittest discover -s tests -p 'test_gold_*.py' -v
+      - name: Installation explicite de PostGIS et Gold
+        if: github.event_name == 'workflow_dispatch' && inputs.appliquer && inputs.installer
+        run: python transformation/transformation_geospatiale.py --installer
+      - name: Collecter les geometries dans Bronze ou JSON
+        env:
+          CHOIX: ${{ inputs.sources }}
+          EVENEMENT: ${{ github.event_name }}
+          CALENDRIER: ${{ github.event.schedule }}
+          APPLIQUER: ${{ inputs.appliquer }}
+        run: |
+          options=()
+          if [ "$EVENEMENT" = schedule ]; then
+            if [ "$CALENDRIER" = '10 7 * * *' ]; then
+              sources=(routes debits)
+            else
+              sources=(travaux)
+            fi
+          else
+            case "$CHOIX" in
+              travaux) sources=(travaux) ;;
+              routes_debits) sources=(routes debits) ;;
+              toutes) sources=(routes travaux debits) ;;
+              *) exit 1 ;;
+            esac
+            if [ "$APPLIQUER" != true ]; then options+=(--json-seulement); fi
+          fi
+          python ingestion/ingestion_geometries.py --sources "${sources[@]}" "${options[@]}"
+      - name: Publier les geometries et references vers Silver et Gold
+        if: success() && (github.event_name == 'schedule' || inputs.appliquer)
+        run: python transformation/transformation_geospatiale.py --apply
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: geometries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            reports/
+            ingestion/output_geometries/
+          retention-days: 3
+          if-no-files-found: ignore
+

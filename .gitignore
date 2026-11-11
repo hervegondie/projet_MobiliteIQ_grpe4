@@ -27,3 +27,7 @@ output_meteo/
 ingestion/output_meteo_horaire/
 ingestion/output_meteo_points/
 reports/
+
+# Collectes geospatiales complementaires
+ingestion/output_geometries/
+

@@ -2,7 +2,7 @@ name: Verification du code Python
 
 on:
   push:
-    branches: [main, dev, feature/polaris]
+    branches: [main, dev, feature/polaris, feature/gold]
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
@@ -34,6 +34,9 @@ jobs:
 
       - name: Tester les ingestions sans reseau ni connexion Neon
         run: python -m unittest discover -s tests -p 'test_ingestion*.py' -v
+
+      - name: Tester les prerequis geospatiaux et les references annuelles
+        run: python -m unittest discover -s tests -p 'test_gold_*.py' -v
 
   tests-neon:
     if: github.event_name == 'workflow_dispatch'
