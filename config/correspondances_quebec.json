@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "description": "Perimetre exploratoire, pas une limite administrative. Seuils provisoires a valider sur carte.",
+  "bbox": [-71.65, 46.65, -70.95, 47.05],
+  "meteo_rayon_m": 15000,
+  "meteo_ecart_min_m": 500,
+  "meteo_fraicheur_minutes": 120,
+  "travaux_distance_m": 15,
+  "travaux_longueur_min_m": 10,
+  "travaux_fraction_min": 0.10,
+  "debit_distance_m": 10,
+  "debit_fraction_min": 0.50,
+  "debit_ecart_fraction_min": 0.10
+}
+

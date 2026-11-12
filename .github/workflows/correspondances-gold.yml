@@ -1,0 +1,53 @@
+name: Correspondances geospatiales Gold
+on:
+  workflow_dispatch:
+    inputs:
+      appliquer:
+        description: 'Publier dans Gold (sinon verification sans publication)'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: gold-geometries-correspondances
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  correspondances:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SILVER_DATABASE_URL: ${{ secrets.SILVER_DATABASE_URL }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-gold.txt
+      - name: Tester les regles hors ligne
+        run: python -m unittest discover -s tests -p 'test_gold_*.py' -v
+      - name: Calculer et publier selon le mode choisi
+        env:
+          EVENEMENT: ${{ github.event_name }}
+          APPLIQUER: ${{ inputs.appliquer }}
+        run: |
+          options=()
+          if [ "$APPLIQUER" = true ]; then
+            options+=(--apply)
+          fi
+          python transformation/correspondances_geospatiales.py "${options[@]}"
+      - name: Controler les correspondances publiees
+        if: success() && inputs.appliquer
+        run: python scripts/controler_gold_automatisation.py correspondances --rapport reports/correspondances_geospatiales.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: correspondances-gold-${{ github.run_id }}
+          path: reports/correspondances_geospatiales.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+
