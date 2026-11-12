@@ -1,0 +1,53 @@
+name: Historique quotidien Gold
+on:
+  schedule:
+    - cron: '5 8 * * *'
+  workflow_dispatch:
+    inputs:
+      jours:
+        description: 'Nombre de jours complets a recalculer (1 a 31)'
+        type: number
+        default: 7
+      appliquer:
+        description: 'Publier les faits dans Silver_test.gold'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: situations-journalieres-gold
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  journalier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SILVER_DATABASE_URL: ${{ secrets.SILVER_DATABASE_URL }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-gold.txt
+      - name: Tests des regles hors ligne
+        run: python -m unittest discover -s tests -p 'test_gold_*.py' -v
+      - name: Construire les jours termines
+        env:
+          EVENEMENT: ${{ github.event_name }}
+          JOURS: ${{ inputs.jours || 7 }}
+          APPLIQUER: ${{ inputs.appliquer }}
+        run: |
+          options=()
+          if [ "$EVENEMENT" = schedule ] || [ "$APPLIQUER" = true ]; then options+=(--apply); fi
+          python transformation/situations_journalieres.py --jours "$JOURS" "${options[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: situations-jour-${{ github.run_id }}
+          path: reports/situations_journalieres.json
+          retention-days: 14
+          if-no-files-found: ignore
