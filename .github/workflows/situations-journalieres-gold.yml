@@ -1,7 +1,5 @@
 name: Historique quotidien Gold
 on:
-  schedule:
-    - cron: '5 8 * * *'
   workflow_dispatch:
     inputs:
       jours:
@@ -15,7 +13,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: situations-journalieres-gold
+  group: meteo-quotidienne-et-gold
   cancel-in-progress: false
 defaults:
   run:
@@ -44,6 +42,9 @@ jobs:
           options=()
           if [ "$EVENEMENT" = schedule ] || [ "$APPLIQUER" = true ]; then options+=(--apply); fi
           python transformation/situations_journalieres.py --jours "$JOURS" "${options[@]}"
+      - name: Verifier la journee publiee
+        if: success() && inputs.appliquer
+        run: python scripts/controler_gold_automatisation.py journalier --rapport reports/situations_journalieres.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -51,3 +52,4 @@ jobs:
           path: reports/situations_journalieres.json
           retention-days: 14
           if-no-files-found: ignore
+

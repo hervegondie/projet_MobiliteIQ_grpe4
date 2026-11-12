@@ -23,7 +23,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: geometries-reference-gold
+  group: gold-geometries-correspondances
   cancel-in-progress: false
 defaults:
   run:
@@ -31,7 +31,7 @@ defaults:
 jobs:
   geometries:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       BRONZE_DATABASE_URL: ${{ secrets.DATABASE_URL }}
       SILVER_DATABASE_URL: ${{ secrets.SILVER_DATABASE_URL }}
@@ -78,6 +78,15 @@ jobs:
       - name: Publier les geometries et references vers Silver et Gold
         if: success() && (github.event_name == 'schedule' || inputs.appliquer)
         run: python transformation/transformation_geospatiale.py --apply
+      - name: Calculer les correspondances apres publication Silver
+        if: success() && (github.event_name == 'schedule' || inputs.appliquer)
+        run: python transformation/correspondances_geospatiales.py --apply
+      - name: Controler la collecte utilisee et la fraicheur Gold
+        if: success() && (github.event_name == 'schedule' || inputs.appliquer)
+        run: python scripts/controler_gold_automatisation.py correspondances --rapport reports/correspondances_geospatiales.json --manifest reports/collecte_geometries.json
+      - name: Signaler un echec Gold
+        if: failure()
+        run: echo '### Echec geometries ou correspondances Gold - consulter la premiere etape rouge.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -87,4 +96,5 @@ jobs:
             ingestion/output_geometries/
           retention-days: 3
           if-no-files-found: ignore
+
 

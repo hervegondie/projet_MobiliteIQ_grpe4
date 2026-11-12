@@ -6,21 +6,16 @@ on:
         description: 'Publier dans Gold (sinon verification sans publication)'
         type: boolean
         default: false
-  workflow_run:
-    workflows: ['Geometries Silver et prerequis Gold']
-    types: [completed]
-    branches: [main]
 permissions:
   contents: read
 concurrency:
-  group: correspondances-gold
+  group: gold-geometries-correspondances
   cancel-in-progress: false
 defaults:
   run:
     shell: bash
 jobs:
   correspondances:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -40,10 +35,13 @@ jobs:
           APPLIQUER: ${{ inputs.appliquer }}
         run: |
           options=()
-          if [ "$EVENEMENT" = workflow_run ] || [ "$APPLIQUER" = true ]; then
+          if [ "$APPLIQUER" = true ]; then
             options+=(--apply)
           fi
           python transformation/correspondances_geospatiales.py "${options[@]}"
+      - name: Controler les correspondances publiees
+        if: success() && inputs.appliquer
+        run: python scripts/controler_gold_automatisation.py correspondances --rapport reports/correspondances_geospatiales.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -51,4 +49,5 @@ jobs:
           path: reports/correspondances_geospatiales.json
           retention-days: 7
           if-no-files-found: ignore
+
 
