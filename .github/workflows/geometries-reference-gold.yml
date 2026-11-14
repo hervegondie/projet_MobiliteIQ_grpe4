@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       sources:
-        description: 'travaux, routes_debits ou toutes'
+        description: 'travaux seuls, ou references routes/debits avec travaux frais'
         type: choice
         options: [toutes, travaux, routes_debits]
         default: toutes
@@ -61,14 +61,14 @@ jobs:
           options=()
           if [ "$EVENEMENT" = schedule ]; then
             if [ "$CALENDRIER" = '10 7 * * *' ]; then
-              sources=(routes debits)
+              sources=(routes travaux debits)
             else
               sources=(travaux)
             fi
           else
             case "$CHOIX" in
               travaux) sources=(travaux) ;;
-              routes_debits) sources=(routes debits) ;;
+              routes_debits) sources=(routes travaux debits) ;;
               toutes) sources=(routes travaux debits) ;;
               *) exit 1 ;;
             esac
@@ -96,5 +96,3 @@ jobs:
             ingestion/output_geometries/
           retention-days: 3
           if-no-files-found: ignore
-
-
