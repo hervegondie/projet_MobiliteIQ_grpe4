@@ -48,7 +48,7 @@ class CorrespondancesPostgisTests(NeonCase):
         for f in works:f['properties']['identifiant']=f['id']
         for f in debits:f['properties']['ide_sectn_trafc']=f['id']
         lots=[dict(source=s,srid=4326,attendu=len(fs),features=fs,
-                   collecte_at=(now+timedelta(seconds=2)).isoformat())
+                   collecte_at=(now-timedelta(seconds=1)).isoformat())
               for s,fs in [('routes',roads),('travaux',works),('debits',debits)]]
         with self.pg.connect(self.urls['silver']) as conn:
             conn.execute(MIGRATION.read_text(encoding='utf-8'),prepare=False)
@@ -121,3 +121,38 @@ class CorrespondancesPostgisTests(NeonCase):
             for value in ['00035-02-065-31C0','000350206531C0','35-02-065-31C0','00035-02-065-31C0 (0)']:
                 self.assertEqual(conn.execute('SELECT gold.normaliser_rtss(%s)',(value,)).fetchone()[0],normaliser_rtss(value))
 
+    def test_stale_source_keeps_previous_publication_and_creates_no_run(self):
+        self.calculate()
+        with self.pg.connect(self.urls['silver']) as conn:
+            before=conn.execute('SELECT run_id FROM gold.correspondance_publication').fetchone()[0]
+            count=conn.execute('SELECT count(*) FROM gold.correspondance_runs').fetchone()[0]
+            conn.execute('UPDATE public.geo_collectes_silver SET collecte_at=%s '
+                'WHERE collecte_id=%s AND source=%s',
+                (datetime.now(timezone.utc)-timedelta(hours=7),self.cid,'travaux'))
+        with self.assertRaisesRegex(ValueError,'travaux'):
+            self.calculate()
+        with self.pg.connect(self.urls['silver']) as conn:
+            self.assertEqual(conn.execute('SELECT run_id FROM gold.correspondance_publication').fetchone()[0],before)
+            self.assertEqual(conn.execute('SELECT count(*) FROM gold.correspondance_runs').fetchone()[0],count)
+
+    def test_expired_during_calculation_rolls_back_all_new_gold_rows(self):
+        from unittest.mock import patch
+        self.calculate()
+        with self.pg.connect(self.urls['silver']) as conn:
+            before=conn.execute('SELECT run_id FROM gold.correspondance_publication').fetchone()[0]
+            count=conn.execute('SELECT count(*) FROM gold.correspondance_runs').fetchone()[0]
+            # Nouvel input pour ne pas passer par le rejeu idempotent.
+            conn.execute('UPDATE public.geo_collectes_silver SET collecte_at=collecte_at-interval \'1 second\' '
+                         'WHERE collecte_id=%s AND source=%s',(self.cid,'travaux'))
+        from transformation.fraicheur_geospatiale import verifier_sources
+        calls=[]
+        def expire(sources,now):
+            calls.append(1)
+            return verifier_sources(sources,now if len(calls)==1 else now+timedelta(hours=5))
+        with patch('transformation.correspondances_geospatiales.verifier_sources',side_effect=expire):
+            with self.assertRaisesRegex(ValueError,'travaux'):
+                self.calculate()
+        self.assertEqual(len(calls),2)
+        with self.pg.connect(self.urls['silver']) as conn:
+            self.assertEqual(conn.execute('SELECT run_id FROM gold.correspondance_publication').fetchone()[0],before)
+            self.assertEqual(conn.execute('SELECT count(*) FROM gold.correspondance_runs').fetchone()[0],count)

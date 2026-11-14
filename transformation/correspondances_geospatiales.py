@@ -9,6 +9,7 @@ import sys
 if __package__ in (None,''):
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from transformation.integration_meteo_horaire import connexion
+from transformation.fraicheur_geospatiale import verifier_sources
 from transformation.regles_correspondances import ALGORITHME,valider_config,routes_travaux,dates_travaux
 from ingestion.points_meteo import charger_points
 from ingestion.contrats_geospatiaux import empreinte
@@ -99,10 +100,13 @@ def construire(conn,config,points,apply=False):
         raise ValueError('Executer --installer pour installer les tables de correspondance')
     conn.execute('SELECT pg_advisory_xact_lock(740221203)')
     sources,configuration,h=entrees(conn,config,points)
+    # Refuser avant tout calcul et avant le rejeu d'un run deja present.
+    verifier_sources(sources,datetime.now(timezone.utc))
     if apply:
         old=conn.execute('SELECT run_id,bilan FROM gold.correspondance_runs '
                          'WHERE empreinte_entrees=%s',(h,)).fetchone()
         if old:
+            verifier_sources(sources,datetime.now(timezone.utc))
             conn.execute('INSERT INTO gold.correspondance_publication(singleton,run_id) VALUES (true,%s) '
                 'ON CONFLICT(singleton) DO UPDATE SET run_id=EXCLUDED.run_id,publie_at=now() '
                 'WHERE gold.correspondance_publication.run_id<>EXCLUDED.run_id',(old[0],))
@@ -130,6 +134,9 @@ def construire(conn,config,points,apply=False):
     duplicates=conn.execute('SELECT count(*) FROM (SELECT troncon_id FROM gold.pont_troncon_debit '
         'WHERE run_id=%s AND statut=\'probable\' GROUP BY troncon_id HAVING count(*)>1) q',(rid,)).fetchone()[0]
     if duplicates:raise ValueError('Plusieurs debits probables pour un troncon')
+    # Le calcul peut durer : reverifier avant de remplacer le pointeur publie.
+    # Une exception sort de la transaction et annule aussi les lignes du nouveau run.
+    verifier_sources(sources,datetime.now(timezone.utc))
     conn.execute('INSERT INTO gold.correspondance_publication(singleton,run_id) VALUES (true,%s) '
         'ON CONFLICT(singleton) DO UPDATE SET run_id=EXCLUDED.run_id,publie_at=now()',(rid,))
     return report
@@ -158,4 +165,3 @@ def main():
 
 
 if __name__=='__main__':main()
-

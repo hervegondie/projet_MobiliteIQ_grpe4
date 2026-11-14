@@ -10,15 +10,7 @@ if __package__ in (None,''):
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 
-def verifier_sources(sources,maintenant):
-    ages={}
-    for source,maximum in [('travaux',4),('routes',168),('debits',168)]:
-        at=datetime.fromisoformat(sources[source]['collecte_at'])
-        if at.utcoffset() is None:raise ValueError('Collecte sans fuseau : '+source)
-        age=(maintenant-at).total_seconds()/3600
-        if not 0<=age<=maximum:raise ValueError('Source trop ancienne ou future : '+source)
-        ages[source]=round(age,2)
-    return ages
+from transformation.fraicheur_geospatiale import verifier_sources
 
 
 def verifier_jour(rapport,jour):
