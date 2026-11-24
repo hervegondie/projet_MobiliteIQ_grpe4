@@ -146,14 +146,39 @@ class MeteoPointsTests(unittest.TestCase):
             spark.assert_not_called()
 
     def test_legacy_http_extraction_accepts_point_coordinates(self):
-        data = quotidienne(self.points[1])
         from datetime import date
-        requests = MagicMock()
-        requests.get.return_value.json.return_value = data['donnees']
-        with patch.dict(sys.modules, requests=requests):
-            legacy.telecharger_brut(date.fromisoformat(data['date_debut']), date.fromisoformat(data['date_fin']),
-                                    latitude=data['latitude'], longitude=data['longitude'])
-        self.assertEqual(requests.get.call_args.kwargs['params']['latitude'], self.points[1]['latitude'])
+
+        data = quotidienne(self.points[1])
+        response = MagicMock()
+        response.status_code = 200
+        response.ok = True
+        response.json.return_value = data["donnees"]
+
+        # Simuler la session, sans remplacer le module requests.
+        with patch("requests.Session") as session_class:
+            session = session_class.return_value.__enter__.return_value
+            session.get.return_value = response
+
+            resultat = legacy.telecharger_brut(
+                date.fromisoformat(data["date_debut"]),
+                date.fromisoformat(data["date_fin"]),
+                latitude=data["latitude"],
+                longitude=data["longitude"],
+            )
+
+        session.get.assert_called_once()
+        params = session.get.call_args.kwargs["params"]
+        self.assertEqual(params["latitude"], self.points[1]["latitude"])
+        self.assertEqual(params["longitude"], self.points[1]["longitude"])
+        self.assertEqual(params["start_date"], data["date_debut"])
+        self.assertEqual(params["end_date"], data["date_fin"])
+        self.assertEqual(resultat, data["donnees"])
+
+        session.mount.assert_called_once()
+        self.assertEqual(session.mount.call_args.args[0], "https://")
+        adapter = session.mount.call_args.args[1]
+        self.assertEqual(adapter.max_retries.total, 3)
+        self.assertIn(429, adapter.max_retries.status_forcelist)
 
     def test_daily_csv_only_produces_42_rows_without_neon(self):
         def response(point, debut, fin, api_url):
