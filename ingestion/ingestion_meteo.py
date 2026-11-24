@@ -117,30 +117,59 @@ def determiner_periode(debut=None, fin=None, jours=7, maintenant=None):
 
 def telecharger_brut(debut, fin, api_url=API_URL, latitude=LATITUDE, longitude=LONGITUDE):
     import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
 
-    response = requests.get(
-        api_url,
-        params={
-            "latitude": latitude,
-            "longitude": longitude,
-            "start_date": debut.isoformat(),
-            "end_date": fin.isoformat(),
-            "daily": ",".join(MESURES),
-            "hourly": "visibility",
-            "timezone": FUSEAU_METEO,
-            "timeformat": "iso8601",
-            "temperature_unit": "celsius",
-            "wind_speed_unit": "kmh",
-            "precipitation_unit": "mm",
-        },
-        timeout=(15, 180),
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "start_date": debut.isoformat(),
+        "end_date": fin.isoformat(),
+        "daily": ",".join(MESURES),
+        "hourly": "visibility",
+        "timezone": FUSEAU_METEO,
+        "timeformat": "iso8601",
+        "temperature_unit": "celsius",
+        "wind_speed_unit": "kmh",
+        "precipitation_unit": "mm",
+    }
+    retries = Retry(
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        respect_retry_after_header=True,
+        raise_on_status=False,
     )
-    response.raise_for_status()
-    data = response.json()
+    print(
+        f"Open-Meteo quotidien : ({latitude}, {longitude}), "
+        f"du {debut} au {fin}",
+        flush=True,
+    )
+    with requests.Session() as session:
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+        try:
+            response = session.get(api_url, params=params, timeout=(30, 180))
+        except requests.exceptions.RequestException as exc:
+            raise ValueError(
+                "Open-Meteo quotidien inaccessible après les tentatives "
+                f"autorisées : {type(exc).__name__}, "
+                f"coordonnées=({latitude}, {longitude})"
+            ) from None
+        print(f"Open-Meteo quotidien : HTTP {response.status_code}", flush=True)
+        if not response.ok:
+            raise ValueError(
+                f"Open-Meteo quotidien : HTTP {response.status_code}, "
+                f"coordonnées=({latitude}, {longitude}). "
+                "Téléchargement interrompu avant chargement Bronze."
+            )
+        try:
+            data = response.json()
+        except ValueError:
+            raise ValueError("Open-Meteo quotidien : réponse JSON invalide.") from None
     if not isinstance(data, dict) or data.get("error"):
-        raise ValueError("L'API Open-Meteo a retourne une erreur")
+        raise ValueError("Open-Meteo quotidien : réponse signalant une erreur.")
     return data
-
 
 def telecharger(debut, fin, api_url=API_URL):
     print(f"Téléchargement météo Québec : {debut} au {fin}...")
@@ -351,7 +380,8 @@ if __name__ == "__main__":
             print(f"ERREUR : {exc}", file=sys.stderr)
         else:
             print(f"Échec de l'ingestion météo ({type(exc).__name__}). "
-                  "Aucune transaction Neon partielle validée. Le CSV déjà créé reste disponible.", file=sys.stderr)
+                  "Consulter la dernière étape affichée. Les fichiers déjà écrits, s'il y en a, restent disponibles.", file=sys.stderr)
         sys.exit(1)
+
 
 
