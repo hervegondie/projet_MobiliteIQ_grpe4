@@ -41,7 +41,7 @@ jobs:
         run: |
           options=()
           if [ "$EVENEMENT" = schedule ] || [ "$APPLIQUER" = true ]; then options+=(--apply); fi
-          python transformation/situations_journalieres.py --jours "$JOURS" "${options[@]}"
+          python transformation/situations_journalieres.py --jours "$JOURS" --max-age-travaux-heures 24 "${options[@]}"
       - name: Verifier la journee publiee
         if: success() && inputs.appliquer
         run: python scripts/controler_gold_automatisation.py journalier --rapport reports/situations_journalieres.json

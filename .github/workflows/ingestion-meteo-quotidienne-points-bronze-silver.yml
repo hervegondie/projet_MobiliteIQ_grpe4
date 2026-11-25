@@ -70,7 +70,7 @@ jobs:
         run: python transformation/transformation_meteo_quotidienne_points.py --manifest reports/collecte_meteo_quotidienne_points.json --verifier --rapport reports/qualite_meteo_quotidienne_points.json
       - name: Construire Gold apres la meteo Silver validee
         if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.csv_seulement) }}
-        run: python transformation/situations_journalieres.py --jours 7 --apply
+        run: python transformation/situations_journalieres.py --jours 7 --max-age-travaux-heures 24 --apply
       - name: Verifier la publication Gold de la veille
         if: ${{ success() && (github.event_name != 'workflow_dispatch' || !inputs.csv_seulement) }}
         run: python scripts/controler_gold_automatisation.py journalier --rapport reports/situations_journalieres.json
